@@ -202,6 +202,113 @@ The CPU's `irq` line is the OR of all peripheral interrupt outputs:
 | Timer | Count reaches zero | Write to `0xFFF5` |
 | UART RX | Data available (when enabled via `0xFFF7` bit 0) | Write to `0xFFF6` |
 
+## Architecture Diagrams
+
+### CPU Core
+
+```mermaid
+graph TB
+    subgraph core["CPU Core — cpu_core.sv"]
+        direction TB
+
+        PC["Program Counter\n24-bit"]
+        IR["Instruction Register\n16-bit"]
+        DEC["Instruction Decode\nopcode | rs | rt | rd | cond | imm4 | imm8"]
+
+        subgraph regfile["Register File"]
+            RF["16 × 16-bit GPRs\nR0–R14 general\nR15 = Stack Pointer"]
+        end
+
+        subgraph alu_block["Arithmetic / Logic"]
+            ALU["ALU — 17-bit wide\n+ − & | ^ ~ « »\nCarry: 6502-style"]
+            MULDIV["MUL/DIV Unit\n16×16 → 32-bit"]
+        end
+
+        FLAGS["Flags: Z | N | C"]
+        BRANCH["Branch Logic\nBRA BEQ BNE BMI BPL BCS BCC"]
+
+        subgraph interrupt["Interrupt System"]
+            INT["Interrupt Logic\nint_enable flag\nVector: 0x0008\nSEI / CLI / IRET"]
+        end
+
+        FSM["FSM Controller — 8 states\nFETCH → EXECUTE → MEM_R/W\nINT_PUSH_PC → INT_PUSH_FLAGS\nIRET_FLAGS | HALTED"]
+
+        MEM["Memory Interface\nmem_addr[23:0]\nmem_read_data[15:0]\nmem_write_data[15:0]\nmem_write_en"]
+    end
+
+    PC --> IR
+    IR --> DEC
+    DEC -->|"rs, rt, rd"| RF
+    DEC -->|"opcode"| ALU
+    RF -->|"rs_val"| ALU
+    RF -->|"rt_val"| ALU
+    RF -->|"operands"| MULDIV
+    ALU -->|"result"| FLAGS
+    ALU -.->|"writeback"| RF
+    MULDIV -.->|"writeback"| RF
+    FLAGS --> BRANCH
+    BRANCH -->|"take_branch"| PC
+    INT -->|"irq check"| FSM
+    FSM -->|"state ctrl"| PC
+    FSM -->|"state ctrl"| MEM
+    PC -->|"addr"| MEM
+
+    IRQ_IN(["irq"]) --> INT
+```
+
+### FSM States
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> FETCH : reset
+
+    FETCH --> EXECUTE : latch IR, advance PC
+    FETCH --> INT_PUSH_PC : irq && int_enable
+
+    EXECUTE --> FETCH : 1-cycle ops (LIMM, LUI, ALU, Branch, SEI, CLI)
+    EXECUTE --> MEM_READ : LOAD, POP, RET
+    EXECUTE --> MEM_WRITE : STORE, PUSH, CALL
+    EXECUTE --> IRET_FLAGS : IRET
+    EXECUTE --> HALTED : HALT
+
+    MEM_READ --> FETCH : data → register or PC (RET)
+    MEM_WRITE --> FETCH : write complete
+
+    INT_PUSH_PC --> INT_PUSH_FLAGS : push PC to stack
+    INT_PUSH_FLAGS --> MEM_WRITE : push flags, disable ints, PC ← 0x0008
+
+    IRET_FLAGS --> MEM_READ : restore flags, enable ints, pop PC
+
+    HALTED --> [*]
+```
+
+### System Overview
+
+```mermaid
+graph LR
+    subgraph bus["Address Bus [23:0] / Data Bus [15:0]"]
+        direction LR
+        SRAM["SRAM\n0x0000–0xFFEF\nProgram + Data"]
+        UART["UART\nTX: 0xFFF0\nRX: 0xFFF6–7\nStatus: 0xFFF1"]
+        TIMER["Timer\n0xFFF2–0xFFF5\nCountdown\nAuto-reload\ntimer.sv"]
+    end
+
+    CPU["CPU Core\ncpu_core.sv\n16 GPRs · 24-bit PC\nALU · MUL/DIV\n8-state FSM"] <-->|"addr/data"| bus
+
+    subgraph irq_block["IRQ Routing"]
+        IRQ_OR{"irq = timer_irq | uart_rx_irq"}
+    end
+
+    TIMER -->|"timer_irq"| IRQ_OR
+    UART -->|"uart_rx_irq"| IRQ_OR
+    IRQ_OR -->|"irq (active-high, level)"| CPU
+
+    CLK(["clk"]) -.-> CPU
+    CLK -.-> TIMER
+```
+
 ## Design Influences
 
 | CPU | What U1624 borrows |
