@@ -23,7 +23,7 @@ J-Type:  [Opcode (4)][Rs (4)][Imm8 (8)]
 B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 ```
 
-### Instructions (37 total)
+### Instructions (39 total)
 
 | Category | Mnemonic | Description | Encoding |
 |----------|----------|-------------|----------|
@@ -53,7 +53,7 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | | `ROL Rd, Rs, Rt` | Rotate left | `0xC` ext, Rd R0–R7 |
 | | `ROR Rd, Rs, Rt` | Rotate right | `0xD` ext, Rd R0–R7 |
 | **Compare** | `CMPI Rs, Imm4` | Compare immediate (sets flags) | `0x5` with Rt=0 |
-| **Control Flow** | `BRA/BEQ/BNE/BMI/BPL Offset8` | Conditional branch | `0x6` B-Type |
+| **Control Flow** | `BRA/BEQ/BNE/BMI/BPL/BCS/BCC/BGE/BLT Offset8` | Conditional branch | `0x6` B-Type |
 | | `CALL Rs` | Call subroutine (push return addr) | `0x7` |
 | | `RET` | Return from subroutine | `0x7000` |
 | | `JAL Rd, Rs` | Jump and link | `0x7` |
@@ -69,12 +69,13 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 
 ### Flags
 
-ALU and compare instructions set three flags:
+ALU and compare instructions set four flags:
 - **Z** (Zero) — result is zero
 - **N** (Negative) — result bit 15 is set
 - **C** (Carry) — set by ADD/ADC/SUB/SBC/ADDI/CMPI (6502 convention: C=1 on ADD overflow, C=1 on SUB when no borrow)
+- **V** (Overflow) — signed overflow detected (result sign wrong for the operand signs)
 
-ADC and SBC use the carry flag as input for multi-word arithmetic chains. Data transfer instructions (LOAD, STORE, PUSH, POP, LIMM, LUI) do not modify flags.
+ADC and SBC use the carry flag as input for multi-word arithmetic chains. BGE and BLT use the overflow flag with N for correct signed comparisons (branch condition is N==V and N!=V respectively). Data transfer instructions (LOAD, STORE, PUSH, POP, LIMM, LUI) do not modify flags.
 
 The status register can be read/written as a single value with `GETF`/`SETF`:
 
@@ -84,6 +85,7 @@ The status register can be read/written as a single value with `GETF`/`SETF`:
 | 1 | N | Negative |
 | 2 | C | Carry |
 | 3 | I | Interrupt enable |
+| 4 | V | Overflow (signed) |
 
 ### Interrupts
 
@@ -141,7 +143,8 @@ U1624/
 │   ├── test_uart_rx.asm     # UART receive test
 │   ├── test_carry.asm       # Carry flag and BCS/BCC test
 │   ├── test_adc_sbc.asm     # ADC/SBC multi-word arithmetic test
-│   └── test_status_reg.asm  # GETF/SETF status register test
+│   ├── test_status_reg.asm  # GETF/SETF status register test
+│   └── test_signed_branch.asm # BGE/BLT signed comparison test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script
@@ -241,8 +244,8 @@ graph TB
             MULDIV["MUL/DIV Unit\n16×16 → 32-bit"]
         end
 
-        FLAGS["Flags: Z | N | C"]
-        BRANCH["Branch Logic\nBRA BEQ BNE BMI BPL BCS BCC"]
+        FLAGS["Flags: Z | N | C | V"]
+        BRANCH["Branch Logic\nBRA BEQ BNE BMI BPL BCS BCC BGE BLT"]
 
         subgraph interrupt["Interrupt System"]
             INT["Interrupt Logic\nint_enable flag\nVector: 0x0008\nSEI / CLI / IRET"]

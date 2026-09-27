@@ -133,9 +133,10 @@ module cpu_core (
     wire [15:0] rt_val = rf[rt]; // Value of register Rt
 
     // ALU output signals
-    reg  [15:0] alu_result; // 16-bit result of the ALU operation
-    reg  [16:0] alu_wide;   // 17-bit intermediate — the extra bit captures carry/borrow
-    reg         alu_carry;  // Carry flag output from the ALU
+    reg  [15:0] alu_result;   // 16-bit result of the ALU operation
+    reg  [16:0] alu_wide;     // 17-bit intermediate — the extra bit captures carry/borrow
+    reg         alu_carry;    // Carry flag output from the ALU
+    reg         alu_overflow; // Overflow flag output — signed overflow detection
 
     // Extended ALU operand — for MUL/DIV, the second operand is restricted
     // to R0–R7 (3-bit register select using lower 3 bits of rt field).
@@ -169,6 +170,11 @@ module cpu_core (
     reg flag_c; // Carry flag:    1 if the operation produced a carry or no borrow
                 //   ADD: C=1 means unsigned overflow (result > 65535)
                 //   SUB: C=1 means no borrow (Rs >= Rt), like the 6502 processor
+    reg flag_v; // Overflow flag: 1 if signed overflow occurred
+                //   Set when the result's sign is wrong — e.g., adding two
+                //   positives gives a negative, or subtracting a negative from
+                //   a positive gives a negative. Required for correct signed
+                //   comparisons (BGE, BLT).
 
     // =========================================================================
     // Main FSM — Sequential Logic
@@ -195,6 +201,7 @@ module cpu_core (
             flag_z         <= 1'b0;
             flag_n         <= 1'b0;
             flag_c         <= 1'b0;
+            flag_v         <= 1'b0;
             mem_addr       <= 24'h000000;
             mem_write_data <= 16'h0000;
             mem_write_en   <= 1'b0;
@@ -319,9 +326,11 @@ module cpu_core (
                             flag_z   <= (alu_result == 16'h0000);
                             flag_n   <= alu_result[15];
 
-                            // Carry flag only updated for ADD and SUB
-                            if (opcode == 4'h4 || opcode == 4'h8)
+                            // Carry and overflow flags only updated for ADD/ADC and SUB/SBC
+                            if (opcode == 4'h4 || opcode == 4'h8) begin
                                 flag_c <= alu_carry;
+                                flag_v <= alu_overflow;
+                            end
 
                             pc       <= pc + 1;
                             mem_addr <= pc + 1;
@@ -338,6 +347,7 @@ module cpu_core (
                             flag_z   <= (alu_result == 16'h0000);
                             flag_n   <= alu_result[15];
                             flag_c   <= alu_carry;
+                            flag_v   <= alu_overflow;
                             pc       <= pc + 1;
                             mem_addr <= pc + 1;
                             state    <= S_FETCH;
@@ -404,12 +414,13 @@ module cpu_core (
                             end else if (imm8 == 8'h04) begin
                                 // GETF Rs — read status register into Rs
                                 // Packs all CPU flags into a single 16-bit value.
-                                // Bit layout: {12'b0, I, C, N, Z}
+                                // Bit layout: {11'b0, V, I, C, N, Z}
                                 //   Bit 0: Z (zero flag)
                                 //   Bit 1: N (negative flag)
                                 //   Bit 2: C (carry flag)
                                 //   Bit 3: I (interrupt enable)
-                                rf[rs] <= {12'b0, int_enable, flag_c, flag_n, flag_z};
+                                //   Bit 4: V (signed overflow flag)
+                                rf[rs] <= {11'b0, flag_v, int_enable, flag_c, flag_n, flag_z};
                                 pc         <= pc + 1;
                                 mem_addr   <= pc + 1;
                                 state      <= S_FETCH;
@@ -422,6 +433,7 @@ module cpu_core (
                                 flag_n     <= rs_val[1];
                                 flag_c     <= rs_val[2];
                                 int_enable <= rs_val[3];
+                                flag_v     <= rs_val[4];
                                 pc         <= pc + 1;
                                 mem_addr   <= pc + 1;
                                 state      <= S_FETCH;
@@ -582,7 +594,7 @@ module cpu_core (
                     next_sp         = rf[15] - 1;
                     rf[15]          <= next_sp;
                     mem_addr        <= {8'h00, next_sp};
-                    mem_write_data  <= {13'b0, flag_c, flag_n, flag_z}; // Pack flags
+                    mem_write_data  <= {11'b0, flag_v, 1'b0, flag_c, flag_n, flag_z}; // Pack flags (bit 3 reserved for I)
                     mem_write_en    <= 1'b1;
                     int_enable      <= 1'b0;       // Disable interrupts during handler
                     pc              <= INT_VECTOR;  // Jump to interrupt handler (0x0008)
@@ -600,6 +612,7 @@ module cpu_core (
                     flag_z     <= mem_read_data[0];
                     flag_n     <= mem_read_data[1];
                     flag_c     <= mem_read_data[2];
+                    flag_v     <= mem_read_data[4];
                     int_enable <= 1'b1;            // Re-enable interrupts
 
                     // Set up to pop the return address (PC) next
@@ -643,7 +656,8 @@ module cpu_core (
     //   The carry out of this addition is naturally 1 when Rs >= Rt.
 
     always @(*) begin
-        alu_carry = 1'b0;
+        alu_carry    = 1'b0;
+        alu_overflow = 1'b0;
         case (opcode)
             4'h4: begin // ADD or ADC (rd[3]=1)
                 // ADD: Rs + Rt
@@ -652,18 +666,28 @@ module cpu_core (
                     alu_wide = {1'b0, rs_val} + {1'b0, rt_val} + {16'b0, flag_c};
                 else
                     alu_wide = {1'b0, rs_val} + {1'b0, rt_val};
-                alu_result = alu_wide[15:0];
-                alu_carry  = alu_wide[16]; // Carry = overflow bit
+                alu_result   = alu_wide[15:0];
+                alu_carry    = alu_wide[16];
+                // Signed overflow: both operands same sign, result different sign
+                alu_overflow = (rs_val[15] == rt_val[15]) && (alu_result[15] != rs_val[15]);
             end
             4'h5: begin // ADDI or CMPI
-                if (rt == 4'h0)
+                if (rt == 4'h0) begin
                     // CMPI: subtract immediate (for comparison, sets flags)
                     alu_wide = {1'b0, rs_val} + {1'b0, ~{12'h000, imm4}} + 17'd1;
-                else
+                    alu_result   = alu_wide[15:0];
+                    alu_carry    = alu_wide[16];
+                    // SUB overflow: operands differ in sign, result sign differs from Rs
+                    alu_overflow = (rs_val[15] != imm4[3]) && (alu_result[15] != rs_val[15]);
+                end else begin
                     // ADDI: add immediate
                     alu_wide = {1'b0, rs_val} + {13'b0, imm4};
-                alu_result = alu_wide[15:0];
-                alu_carry  = alu_wide[16];
+                    alu_result   = alu_wide[15:0];
+                    alu_carry    = alu_wide[16];
+                    // ADD overflow: imm4 is always positive (unsigned), so overflow
+                    // only if Rs positive and result negative
+                    alu_overflow = (!rs_val[15]) && alu_result[15];
+                end
             end
             4'h8: begin // SUB, SBC (rd[3]=1), or NEG (rs==rt)
                 if (rd[3])
@@ -677,8 +701,10 @@ module cpu_core (
                 else
                     // SUB: Rs - Rt using two's complement addition
                     alu_wide = {1'b0, rs_val} + {1'b0, ~rt_val} + 17'd1;
-                alu_result = alu_wide[15:0];
-                alu_carry  = alu_wide[16];
+                alu_result   = alu_wide[15:0];
+                alu_carry    = alu_wide[16];
+                // SUB overflow: operands differ in sign, result sign differs from Rs
+                alu_overflow = (rs_val[15] != rt_val[15]) && (alu_result[15] != rs_val[15]);
             end
             4'h9:    alu_result = rs_val & rt_val;          // AND — bitwise AND
             4'hA:    alu_result = rs_val | rt_val;          // OR  — bitwise OR
@@ -707,6 +733,13 @@ module cpu_core (
     //   4 = positive (not negative and not zero)
     //   5 = carry set (unsigned >=, or ADD overflow)
     //   6 = carry clear (unsigned <, or no ADD overflow)
+    //   7 = signed >= (N == V)
+    //   8 = signed <  (N != V)
+    //
+    // BGE and BLT use the classic N XOR V test for signed comparisons.
+    // After SUB or CMPI, N alone is unreliable when signed overflow occurs
+    // (e.g., 100 - (-100) overflows to a negative result). The overflow
+    // flag V corrects for this: N == V means the true result is >= 0.
 
     always @(*) begin
         case (cond)
@@ -717,6 +750,8 @@ module cpu_core (
             4'h4:    take_branch = !flag_n && !flag_z;  // BPL (Positive)
             4'h5:    take_branch = flag_c;              // BCS (Carry Set / Unsigned >=)
             4'h6:    take_branch = !flag_c;             // BCC (Carry Clear / Unsigned <)
+            4'h7:    take_branch = (flag_n == flag_v);  // BGE (Signed >=)
+            4'h8:    take_branch = (flag_n != flag_v);  // BLT (Signed <)
             default: take_branch = 1'b0;
         endcase
     end
