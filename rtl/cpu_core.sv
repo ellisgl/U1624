@@ -437,6 +437,29 @@ module cpu_core (
                                 pc         <= pc + 1;
                                 mem_addr   <= pc + 1;
                                 state      <= S_FETCH;
+                            end else if (imm8 == 8'h06) begin
+                                // ENTER n — set up stack frame
+                                // 1. Push R14 (old frame pointer) onto the stack
+                                // 2. R14 ← SP (new frame base)
+                                // 3. SP ← SP − n (allocate n words for locals)
+                                // The frame size n (0–15) is encoded in the rs field.
+                                // R14 is the dedicated frame pointer register.
+                                next_sp         = rf[15] - 1;
+                                mem_addr        <= {8'h00, next_sp};
+                                mem_write_data  <= rf[14];
+                                mem_write_en    <= 1'b1;
+                                rf[14]          <= next_sp;
+                                rf[15]          <= next_sp - {12'b0, rs};
+                                pc              <= pc + 1;
+                                state           <= S_MEM_WRITE;
+                            end else if (imm8 == 8'h07) begin
+                                // LEAVE — tear down stack frame
+                                // 1. SP ← R14 + 1 (deallocate locals + pop)
+                                // 2. Pop old R14 from [R14] (restore caller's FP)
+                                mem_addr <= {8'h00, rf[14]};
+                                rf[15]   <= rf[14] + 1;
+                                pc       <= pc + 1;
+                                state    <= S_MEM_READ;
                             end else begin
                                 // CALL Rs — call subroutine at address in Rs
                                 // Push the return address (PC+1) onto the stack,
@@ -543,6 +566,10 @@ module cpu_core (
                         // IRET (second phase) — restore PC from stack
                         pc       <= {8'h00, mem_read_data};
                         mem_addr <= {8'h00, mem_read_data};
+                    end else if (opcode == 4'h7 && imm8 == 8'h07) begin
+                        // LEAVE (second phase) — restore frame pointer
+                        rf[14]   <= mem_read_data;
+                        mem_addr <= pc;
                     end else begin
                         // LOAD — write the loaded value to the destination register
                         rf[rt]   <= mem_read_data;

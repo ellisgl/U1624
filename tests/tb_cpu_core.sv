@@ -211,7 +211,7 @@ module tb_cpu_core;
                  $time, uut.pc, uut.opcode, uut.rf[0], uut.rf[1], uut.rf[2]);
 
         // Fallback Timeout Limit
-        #5000;
+        #10000;
         $display("[TIMEOUT ALERT] Simulation hit max runtime fallback limit.");
         $finish;
     end

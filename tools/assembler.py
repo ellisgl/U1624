@@ -98,7 +98,7 @@ RESERVED_MNEMONICS = (
     set(OPCODES.keys()) | set(BRANCH_CONDITIONS.keys()) |
     {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
      'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET', 'LUI',
-     'ADC', 'SBC', 'GETF', 'SETF'}
+     'ADC', 'SBC', 'GETF', 'SETF', 'ENTER', 'LEAVE'}
 )
 
 def count_directive_words(line):
@@ -436,6 +436,19 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
             rs = parse_register(tokens[1])
             word = (OPCODES['CALL'] << 12) | (rs << 8) | 0x05
             return f"{word:04X} // {line}"
+
+        # Handle ENTER (set up stack frame: opcode 0x7, imm8=0x06)
+        elif mnemonic == 'ENTER':
+            if len(tokens) < 2:
+                raise ValueError(f"ENTER requires a frame size (0-15): '{line}'")
+            frame_size = parse_immediate(tokens[1], max_bits=4)
+            word = (OPCODES['CALL'] << 12) | (frame_size << 8) | 0x06
+            return f"{word:04X} // {line}"
+
+        # Handle LEAVE (tear down stack frame: opcode 0x7, imm8=0x07)
+        elif mnemonic == 'LEAVE':
+            word = 0x7007
+            return f"{word:04X} // LEAVE"
 
         elif mnemonic == 'NOP':
             word = 0x6001

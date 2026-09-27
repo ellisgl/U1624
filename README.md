@@ -23,7 +23,7 @@ J-Type:  [Opcode (4)][Rs (4)][Imm8 (8)]
 B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 ```
 
-### Instructions (39 total)
+### Instructions (41 total)
 
 | Category | Mnemonic | Description | Encoding |
 |----------|----------|-------------|----------|
@@ -62,6 +62,8 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | **Interrupts** | `SEI` | Set interrupt enable | `0x7002` |
 | | `CLI` | Clear interrupt enable | `0x7003` |
 | | `IRET` | Return from interrupt (restore flags + PC) | `0x7001` |
+| **Stack Frame** | `ENTER n` | Set up stack frame (n = 0–15 local words) | `0x7n06` |
+| | `LEAVE` | Tear down stack frame | `0x7007` |
 | **Status** | `GETF Rd` | Read status register into Rd | `0x7R04` |
 | | `SETF Rs` | Write status register from Rs | `0x7R05` |
 | **Directives** | `.word val, ...` | Embed 16-bit constants | |
@@ -128,6 +130,35 @@ start:
     STORE R1, [R0 + 0]  ; write to UART
 ```
 
+### Stack Frames
+
+`ENTER` and `LEAVE` provide hardware-assisted function prologue/epilogue. R14 is the dedicated frame pointer (FP), R15 is the stack pointer (SP).
+
+| Instruction | Operation |
+|-------------|-----------|
+| `ENTER n` | Push R14, R14 ← SP, SP ← SP − n (allocate n local words) |
+| `LEAVE` | SP ← R14 + 1, Pop R14 (deallocate frame, restore caller's FP) |
+
+The frame size `n` (0–15) is encoded directly in the instruction. After `ENTER`, the frame looks like:
+
+```
+[R14 + 2]  → first parameter (pushed by caller before CALL)
+[R14 + 1]  → return address (pushed by CALL)
+[R14]      → saved old R14 (pushed by ENTER)
+[R14 − 1]  → local variable 0
+[R14 − n]  → local variable n−1 ← SP
+```
+
+Example function with locals:
+
+```asm
+my_func:
+    ENTER 2              ; save FP, allocate 2 local words
+    ; ... use locals via computed offsets from R14 ...
+    LEAVE                ; restore FP and SP
+    RET                  ; return to caller
+```
+
 ## Project Structure
 
 ```
@@ -144,7 +175,8 @@ U1624/
 │   ├── test_carry.asm       # Carry flag and BCS/BCC test
 │   ├── test_adc_sbc.asm     # ADC/SBC multi-word arithmetic test
 │   ├── test_status_reg.asm  # GETF/SETF status register test
-│   └── test_signed_branch.asm # BGE/BLT signed comparison test
+│   ├── test_signed_branch.asm # BGE/BLT signed comparison test
+│   └── test_stack_frame.asm # ENTER/LEAVE stack frame test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script
