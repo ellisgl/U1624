@@ -12,10 +12,18 @@ module tb_cpu_core;
     wire [15:0] mem_write_data;
     wire        mem_write_en;
 
-    // Interrupt signal
-    reg         irq;
-    reg         irq_fired;
-    integer     irq_hold;
+    // Address Decode: I/O space 0x00FFF0 - 0x00FFFF
+    wire is_io = (mem_addr[15:4] == 12'hFFF);
+
+    // Timer peripheral
+    wire        timer_irq;
+    wire [15:0] timer_read_data;
+    wire        timer_select = is_io && (mem_addr[3:0] >= 4'h2 && mem_addr[3:0] <= 4'h5);
+    wire [1:0]  timer_reg_addr = mem_addr[3:0] - 4'h2;
+    wire        timer_write_en = mem_write_en && timer_select;
+
+    // Interrupt: OR of all interrupt sources
+    wire irq = timer_irq;
 
     // Instantiate the CPU Core Module
     cpu_core uut (
@@ -28,10 +36,16 @@ module tb_cpu_core;
         .irq(irq)
     );
 
-    // ---------------------------------------------------------
-    // Address Decode: I/O space starts at 0xFF0000
-    // ---------------------------------------------------------
-    wire is_io = (mem_addr[15:4] == 12'hFFF); // I/O space: 0x00FFF0 - 0x00FFFF
+    // Instantiate Timer Peripheral
+    timer timer0 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .reg_addr(timer_reg_addr),
+        .write_data(mem_write_data),
+        .write_en(timer_write_en),
+        .read_data(timer_read_data),
+        .irq(timer_irq)
+    );
 
     // ---------------------------------------------------------
     // Mock Synchronous RAM Model (Preloaded with instructions)
@@ -46,10 +60,14 @@ module tb_cpu_core;
     reg [15:0] io_read_data;
 
     always @(*) begin
-        case (mem_addr[3:0])
-            4'h1:    io_read_data = 16'h0001; // UART status: always ready
-            default: io_read_data = 16'h0000;
-        endcase
+        if (timer_select)
+            io_read_data = timer_read_data;
+        else begin
+            case (mem_addr[3:0])
+                4'h1:    io_read_data = 16'h0001; // UART status: always ready
+                default: io_read_data = 16'h0000;
+            endcase
+        end
     end
 
     // Address-decoded read mux
@@ -69,6 +87,9 @@ module tb_cpu_core;
                         uart_buffer[uart_len*8 +: 8] = mem_write_data[7:0];
                         uart_len = uart_len + 1;
                     end
+                    4'h2, 4'h3, 4'h4, 4'h5: begin
+                        // Timer registers — handled by timer module
+                    end
                     default: begin
                         $display("[IO WRITE] Unknown register 0x%h | Data: 0x%h", mem_addr, mem_write_data);
                     end
@@ -76,23 +97,6 @@ module tb_cpu_core;
             end else begin
                 sram[mem_addr[5:0]] <= mem_write_data;
                 $display("[MEM WRITE] Addr: 0x%h | Data: 0x%h", mem_addr, mem_write_data);
-            end
-        end
-    end
-
-    // ---------------------------------------------------------
-    // IRQ Trigger Logic
-    // ---------------------------------------------------------
-    always @(posedge clk) begin
-        if (!irq_fired && uut.int_enable) begin
-            irq       <= 1'b1;
-            irq_fired <= 1'b1;
-            irq_hold  <= 0;
-        end
-        if (irq && irq_fired) begin
-            irq_hold <= irq_hold + 1;
-            if (irq_hold >= 4) begin
-                irq <= 1'b0;
             end
         end
     end
@@ -150,9 +154,6 @@ module tb_cpu_core;
         end
 
         uart_len = 0;
-        irq = 0;
-        irq_fired = 0;
-        irq_hold = 0;
 
         // Stream raw machine code dynamically from your tools directory
         $readmemh("./program.hex", sram);

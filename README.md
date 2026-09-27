@@ -105,9 +105,10 @@ start:
 ```
 U1624/
 ├── rtl/
-│   └── cpu_core.sv          # CPU core RTL (SystemVerilog)
+│   ├── cpu_core.sv          # CPU core RTL (SystemVerilog)
+│   └── timer.sv             # Countdown timer peripheral
 ├── tests/
-│   └── tb_cpu_core.sv       # Testbench with mock SRAM and UART
+│   └── tb_cpu_core.sv       # Testbench with mock SRAM, UART, and timer
 ├── tools/
 │   └── assembler.py         # Two-pass assembler with label support
 └── run_sim.sh               # Build and simulate script
@@ -167,7 +168,11 @@ This assembles the source, compiles the RTL with Icarus Verilog, and launches th
 | `0x000000`–`0x00FFEF` | RAM / Program memory |
 | `0x00FFF0` | UART TX Data (write) |
 | `0x00FFF1` | UART Status (read, bit 0 = TX ready) |
-| `0x00FFF2`–`0x00FFFF` | Reserved I/O |
+| `0x00FFF2` | Timer reload value (R/W — also sets count) |
+| `0x00FFF3` | Timer current count (R) |
+| `0x00FFF4` | Timer control (R/W, bit 0: enable, bit 1: auto-reload) |
+| `0x00FFF5` | Timer status (R: bit 0 = fired; W: acknowledge/clear) |
+| `0x00FFF6`–`0x00FFFF` | Reserved I/O |
 
 ## Design Influences
 
