@@ -133,4 +133,4 @@ This runs the assembler, compiles the RTL with Icarus Verilog, and launches the 
 
 ## License
 
-MIT
+BSD 3-Clause — see [LICENSE](LICENSE).
