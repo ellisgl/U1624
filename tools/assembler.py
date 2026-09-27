@@ -93,7 +93,7 @@ def is_instruction(line):
 RESERVED_MNEMONICS = (
     set(OPCODES.keys()) | set(BRANCH_CONDITIONS.keys()) |
     {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
-     'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET'}
+     'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET', 'LUI'}
 )
 
 def count_directive_words(line):
@@ -258,6 +258,17 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
             rs = parse_register(tokens[1])
             imm4 = parse_immediate(tokens[2], max_bits=4)
             word = (OPCODES['ADDI'] << 12) | (rs << 8) | (0 << 4) | imm4
+            return f"{word:04X} // {line}"
+
+        # Handle LUI Instruction (sub-format of POP: opcode 0x3 with imm8≠0)
+        elif mnemonic == 'LUI':
+            if len(tokens) < 3:
+                raise ValueError(f"LUI requires Destination, Immediate: '{line}'")
+            rd = parse_register(tokens[1])
+            imm8 = parse_immediate(tokens[2], max_bits=8)
+            if imm8 == 0:
+                raise ValueError("LUI immediate must be non-zero (0 collides with POP encoding)")
+            word = (OPCODES['POP'] << 12) | (rd << 8) | imm8
             return f"{word:04X} // {line}"
 
         # 4. Handle LIMM Instruction — supports label references as the immediate

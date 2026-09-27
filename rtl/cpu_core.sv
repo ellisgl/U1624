@@ -120,16 +120,18 @@ module cpu_core (
                             state    <= S_FETCH;
                         end
                         
-                        4'h3: begin // POP Rd (Uses rs field as destination register Rd)
-                            // Read from the current address pointed to by R15 (SP)
-                            mem_addr <= {8'h00, rf[15]}; 
-                            
-                            // Increment Stack Pointer post-read
-                            rf[15]   <= rf[15] + 1; 
-                            pc       <= pc + 1;
-                            
-                            // Divert to memory read state, but we need to tell it to latch into Rd (rs position)
-                            state    <= S_MEM_READ; 
+                        4'h3: begin // POP Rd (imm8=0) or LUI Rd, Imm8 (imm8≠0)
+                            if (imm8 == 8'h00) begin // POP
+                                mem_addr <= {8'h00, rf[15]};
+                                rf[15]   <= rf[15] + 1;
+                                pc       <= pc + 1;
+                                state    <= S_MEM_READ;
+                            end else begin // LUI — load upper immediate, preserve lower byte
+                                rf[rs]   <= {imm8, rf[rs][7:0]};
+                                pc       <= pc + 1;
+                                mem_addr <= pc + 1;
+                                state    <= S_FETCH;
+                            end
                         end
 
                         4'h4, 4'h8, 4'h9, 4'hA, 4'hB, 4'hC, 4'hD: begin // ALU R-type

@@ -27,7 +27,8 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | Category | Mnemonic | Description | Encoding |
 |----------|----------|-------------|----------|
 | **Data Transfer** | `MOV Rd, Rs` | Register copy | OR Rd, Rs, Rs |
-| | `LIMM Rd, Imm8` | Load 8-bit immediate | `0x2` J-Type |
+| | `LIMM Rd, Imm8` | Load 8-bit immediate (zeros upper byte) | `0x2` J-Type |
+| | `LUI Rd, Imm8` | Load upper immediate (preserves lower byte) | `0x3` J-Type, Imm8≠0 |
 | | `LOAD Rt, [Rs+Imm4]` | Load from memory | `0x0` I-Type |
 | | `STORE Rt, [Rs+Imm4]` | Store to memory | `0x1` I-Type |
 | | `PUSH Rs` | Push to stack (pre-decrement SP) | `0xE` |
