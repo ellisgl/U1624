@@ -93,7 +93,7 @@ def is_instruction(line):
 RESERVED_MNEMONICS = (
     set(OPCODES.keys()) | set(BRANCH_CONDITIONS.keys()) |
     {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
-     'MOV', 'NOT', 'NEG', 'ROL', 'ROR'}
+     'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET'}
 )
 
 def count_directive_words(line):
@@ -368,6 +368,18 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
         elif mnemonic == 'RET':
             word = 0x7000
             return f"{word:04X} // {line}"
+
+        elif mnemonic == 'IRET':
+            word = 0x7001
+            return f"{word:04X} // IRET"
+
+        elif mnemonic == 'SEI':
+            word = 0x7002
+            return f"{word:04X} // SEI"
+
+        elif mnemonic == 'CLI':
+            word = 0x7003
+            return f"{word:04X} // CLI"
 
         elif mnemonic == 'NOP':
             word = 0x6001

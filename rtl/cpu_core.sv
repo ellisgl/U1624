@@ -8,15 +8,24 @@ module cpu_core (
     output reg  [23:0] mem_addr,
     input  wire [15:0] mem_read_data,
     output reg  [15:0] mem_write_data,
-    output reg         mem_write_en
+    output reg         mem_write_en,
+
+    // Interrupt Interface
+    input  wire        irq
 );
 
     // FSM States
-    localparam [2:0] S_FETCH     = 3'd0,
-                     S_EXECUTE   = 3'd1,
-                     S_MEM_READ  = 3'd2,
-                     S_MEM_WRITE = 3'd3,
-                     S_HALTED    = 3'd4;
+    localparam [3:0] S_FETCH          = 4'd0,
+                     S_EXECUTE        = 4'd1,
+                     S_MEM_READ       = 4'd2,
+                     S_MEM_WRITE      = 4'd3,
+                     S_HALTED         = 4'd4,
+                     S_INT_PUSH_PC    = 4'd5,
+                     S_INT_PUSH_FLAGS = 4'd6,
+                     S_IRET_FLAGS     = 4'd7;
+
+    // Interrupt vector address
+    localparam [23:0] INT_VECTOR = 24'h000008;
 
     // Program Counter
     reg [23:0] pc;
@@ -28,7 +37,10 @@ module cpu_core (
     reg [15:0] instr_reg;
 
     // FSM State
-    reg [2:0] state;
+    reg [3:0] state;
+
+    // Interrupt enable flag
+    reg int_enable;
 
     // Instruction Register wire slices
     wire [15:0] instr  = instr_reg;
@@ -68,16 +80,21 @@ module cpu_core (
             mem_addr       <= 24'h000000;
             mem_write_data <= 16'h0000;
             mem_write_en   <= 1'b0;
+            int_enable     <= 1'b0;
 
             for (i = 0; i < 16; i = i + 1)
                 rf[i] <= 16'h0000;
         end else begin
             case (state)
                 S_FETCH: begin
-                    instr_reg    <= mem_read_data;
-                    mem_write_en <= 1'b0;
-                    mem_addr     <= pc;
-                    state        <= S_EXECUTE;
+                    if (irq && int_enable) begin
+                        state <= S_INT_PUSH_PC;
+                    end else begin
+                        instr_reg    <= mem_read_data;
+                        mem_write_en <= 1'b0;
+                        mem_addr     <= pc;
+                        state        <= S_EXECUTE;
+                    end
                 end
 
                 S_EXECUTE: begin
@@ -148,20 +165,34 @@ module cpu_core (
                             state <= S_FETCH;
                         end
 
-                        4'h7: begin // CALL or RET (Opcode 0x7)
-                            if (instr[11:0] == 12'h000) begin // RET Syntax: 16'h7000
+                        4'h7: begin // CALL, RET, IRET, SEI, CLI (Opcode 0x7)
+                            if (instr[11:0] == 12'h000) begin // RET
                                 mem_addr <= {8'h00, rf[15]};
                                 rf[15]   <= rf[15] + 1;
                                 state    <= S_MEM_READ;
+                            end else if (instr[11:0] == 12'h001) begin // IRET
+                                mem_addr <= {8'h00, rf[15]};
+                                rf[15]   <= rf[15] + 1;
+                                state    <= S_IRET_FLAGS;
+                            end else if (instr[11:0] == 12'h002) begin // SEI
+                                int_enable <= 1'b1;
+                                pc         <= pc + 1;
+                                mem_addr   <= pc + 1;
+                                state      <= S_FETCH;
+                            end else if (instr[11:0] == 12'h003) begin // CLI
+                                int_enable <= 1'b0;
+                                pc         <= pc + 1;
+                                mem_addr   <= pc + 1;
+                                state      <= S_FETCH;
                             end else begin
                                 // --- CALL Rs EXECUTION ---
-                                next_sp  = rf[15] - 1; // Removed 'reg [15:0]' keyword
+                                next_sp  = rf[15] - 1;
                                 rf[15]          <= next_sp;
-                
+
                                 mem_addr        <= {8'h00, next_sp};
                                 mem_write_data  <= pc + 1;
                                 mem_write_en    <= 1'b1;
-                                
+
                                 pc              <= {8'h00, rs_val};
                                 state           <= S_MEM_WRITE;
                             end
@@ -224,8 +255,11 @@ module cpu_core (
                         rf[rs]   <= mem_read_data; // POP target
                         mem_addr <= pc;
                     end else if (opcode == 4'h7 && instr[11:0] == 12'h000) begin
-                        pc       <= {8'h00, mem_read_data}; // RET target goes to PC
-                        mem_addr <= {8'h00, mem_read_data}; // Pre-fetch from new PC address
+                        pc       <= {8'h00, mem_read_data}; // RET
+                        mem_addr <= {8'h00, mem_read_data};
+                    end else if (opcode == 4'h7 && instr[11:0] == 12'h001) begin
+                        pc       <= {8'h00, mem_read_data}; // IRET — restore PC
+                        mem_addr <= {8'h00, mem_read_data};
                     end else begin
                         rf[rt]   <= mem_read_data; // LOAD target
                         mem_addr <= pc;
@@ -237,6 +271,35 @@ module cpu_core (
                     mem_write_en <= 1'b0;
                     mem_addr     <= pc;
                     state        <= S_FETCH;
+                end
+
+                S_INT_PUSH_PC: begin
+                    next_sp         = rf[15] - 1;
+                    rf[15]          <= next_sp;
+                    mem_addr        <= {8'h00, next_sp};
+                    mem_write_data  <= pc[15:0];
+                    mem_write_en    <= 1'b1;
+                    state           <= S_INT_PUSH_FLAGS;
+                end
+
+                S_INT_PUSH_FLAGS: begin
+                    next_sp         = rf[15] - 1;
+                    rf[15]          <= next_sp;
+                    mem_addr        <= {8'h00, next_sp};
+                    mem_write_data  <= {14'b0, flag_n, flag_z};
+                    mem_write_en    <= 1'b1;
+                    int_enable      <= 1'b0;
+                    pc              <= INT_VECTOR;
+                    state           <= S_MEM_WRITE;
+                end
+
+                S_IRET_FLAGS: begin
+                    flag_z     <= mem_read_data[0];
+                    flag_n     <= mem_read_data[1];
+                    int_enable <= 1'b1;
+                    mem_addr   <= {8'h00, rf[15]};
+                    rf[15]     <= rf[15] + 1;
+                    state      <= S_MEM_READ;
                 end
 
                 S_HALTED: begin

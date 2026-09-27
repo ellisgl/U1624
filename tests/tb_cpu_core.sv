@@ -12,6 +12,11 @@ module tb_cpu_core;
     wire [15:0] mem_write_data;
     wire        mem_write_en;
 
+    // Interrupt signal
+    reg         irq;
+    reg         irq_fired;
+    integer     irq_hold;
+
     // Instantiate the CPU Core Module
     cpu_core uut (
         .clk(clk),
@@ -19,7 +24,8 @@ module tb_cpu_core;
         .mem_addr(mem_addr),
         .mem_read_data(mem_read_data),
         .mem_write_data(mem_write_data),
-        .mem_write_en(mem_write_en)
+        .mem_write_en(mem_write_en),
+        .irq(irq)
     );
 
     // ---------------------------------------------------------
@@ -75,6 +81,23 @@ module tb_cpu_core;
     end
 
     // ---------------------------------------------------------
+    // IRQ Trigger Logic
+    // ---------------------------------------------------------
+    always @(posedge clk) begin
+        if (!irq_fired && uut.int_enable) begin
+            irq       <= 1'b1;
+            irq_fired <= 1'b1;
+            irq_hold  <= 0;
+        end
+        if (irq && irq_fired) begin
+            irq_hold <= irq_hold + 1;
+            if (irq_hold >= 4) begin
+                irq <= 1'b0;
+            end
+        end
+    end
+
+    // ---------------------------------------------------------
     // Hardware Execution Termination Watchdog
     // ---------------------------------------------------------
     always @(posedge clk) begin
@@ -85,17 +108,22 @@ module tb_cpu_core;
                 $display("[UART OUTPUT] %0d character(s) transmitted.", uart_len);
             end
 
-            if (sram[30] == 16'h0042 && sram[31] == 16'hFF00 &&
-                sram[32] == 16'hFFFF && sram[33] == 16'h0F10 &&
-                sram[34] == 16'hF001) begin
+            $display("[RESULTS] sram[30]=0x%h  sram[31]=0x%h  sram[32]=0x%h  sram[33]=0x%h  sram[34]=0x%h",
+                     sram[30], sram[31], sram[32], sram[33], sram[34]);
+
+            if (sram[30] == 16'h0055 && sram[31] == 16'h0042 &&
+                sram[32] == 16'h0001) begin
+                $display("[SIMULATION PASSED] Interrupt test verified:");
+                $display("  Main continued=0x%h  Handler ran=0x%h  Flags preserved=0x%h\n",
+                         sram[30], sram[31], sram[32]);
+            end else if (sram[30] == 16'h0042 && sram[31] == 16'hFF00 &&
+                         sram[32] == 16'hFFFF && sram[33] == 16'h0F10 &&
+                         sram[34] == 16'hF001) begin
                 $display("[SIMULATION PASSED] PDP-16 instructions verified:");
                 $display("  MOV=0x%h  NOT=0x%h  NEG=0x%h", sram[30], sram[31], sram[32]);
                 $display("  ROL=0x%h  ROR=0x%h\n", sram[33], sram[34]);
             end else begin
-                $display("[SIMULATION FAILED] PDP-16 instruction mismatch:");
-                $display("  MOV: 0x%h (exp 0042)  NOT: 0x%h (exp FF00)", sram[30], sram[31]);
-                $display("  NEG: 0x%h (exp FFFF)  ROL: 0x%h (exp 0F10)", sram[32], sram[33]);
-                $display("  ROR: 0x%h (exp F001)\n", sram[34]);
+                $display("[SIMULATION FAILED] Unexpected values in data area.\n");
             end
             $finish;
         end
@@ -122,6 +150,9 @@ module tb_cpu_core;
         end
 
         uart_len = 0;
+        irq = 0;
+        irq_fired = 0;
+        irq_hold = 0;
 
         // Stream raw machine code dynamically from your tools directory
         $readmemh("./program.hex", sram);
@@ -141,7 +172,7 @@ module tb_cpu_core;
                  $time, uut.pc, uut.opcode, uut.rf[0], uut.rf[1], uut.rf[2]);
 
         // Fallback Timeout Limit
-        #3200;
+        #5000;
         $display("[TIMEOUT ALERT] Simulation hit max runtime fallback limit.");
         $finish;
     end

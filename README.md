@@ -55,6 +55,9 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | | `JAL Rd, Rs` | Jump and link | `0x7` |
 | | `NOP` | No operation | BRA +1 (`0x6001`) |
 | | `HALT` | Stop execution | `0xF000` |
+| **Interrupts** | `SEI` | Set interrupt enable | `0x7002` |
+| | `CLI` | Clear interrupt enable | `0x7003` |
+| | `IRET` | Return from interrupt (restore flags + PC) | `0x7001` |
 | **Directives** | `.word val, ...` | Embed 16-bit constants | |
 | | `.byte val, ...` | Embed 8-bit values (packed 2/word) | |
 
@@ -65,6 +68,36 @@ ALU and compare instructions set two flags:
 - **N** (Negative) — result bit 15 is set
 
 Data transfer instructions (LOAD, STORE, PUSH, POP, LIMM) do not modify flags.
+
+### Interrupts
+
+The CPU supports single-level, non-nestable interrupts with a fixed vector at address `0x0008`.
+
+| Feature | Detail |
+|---------|--------|
+| Vector address | `0x0008` (fixed) |
+| Enable/disable | `SEI` / `CLI` instructions |
+| On entry | Push PC and flags to stack, clear interrupt enable, jump to vector |
+| On `IRET` | Pop flags and PC from stack, re-enable interrupts |
+| Check point | At `S_FETCH` — between instructions, never mid-instruction |
+| Nesting | Not supported (interrupts disabled during handler) |
+
+The `irq` input is active-high and level-sensitive. The CPU checks it at the start of each fetch cycle. Programs should place their interrupt handler at address `0x0008` and use a branch at address `0x0000` to skip past it:
+
+```asm
+    BRA start           ; skip past vector area
+    NOP                 ; padding (addresses 1-7)
+    ...
+
+int_handler:            ; address 0x0008
+    ; handle interrupt
+    IRET
+
+start:
+    LIMM R15, 60        ; init stack pointer
+    SEI                 ; enable interrupts
+    ; main program...
+```
 
 ## Project Structure
 
