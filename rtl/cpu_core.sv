@@ -116,7 +116,10 @@ module cpu_core (
                         end
 
                         4'h4, 4'h8, 4'h9, 4'hA, 4'hB, 4'hC, 4'hD: begin // ALU R-type
-                            rf[rd]   <= alu_result;
+                            if ((opcode == 4'hC || opcode == 4'hD) && rd[3])
+                                rf[rd[2:0]] <= alu_result; // ROL/ROR dest R0-R7
+                            else
+                                rf[rd] <= alu_result;
                             flag_z   <= (alu_result == 16'h0000);
                             flag_n   <= alu_result[15];
                             pc       <= pc + 1;
@@ -251,12 +254,16 @@ module cpu_core (
             4'h4:    alu_result = rs_val + rt_val;          // ADD
             4'h5:    alu_result = (rt == 4'h0) ? rs_val - {12'h000, imm4}  // CMPI
                                               : rs_val + {12'h000, imm4}; // ADDI
-            4'h8:    alu_result = rs_val - rt_val;          // SUB
+            4'h8:    alu_result = (rs == rt) ? (~rs_val + 16'd1)   // NEG
+                                              : (rs_val - rt_val);  // SUB
             4'h9:    alu_result = rs_val & rt_val;          // AND
             4'hA:    alu_result = rs_val | rt_val;          // OR
-            4'hB:    alu_result = rs_val ^ rt_val;          // XOR
-            4'hC:    alu_result = rs_val << rt_val[3:0];    // SHL
-            4'hD:    alu_result = rs_val >> rt_val[3:0];    // SHR
+            4'hB:    alu_result = (rs == rt) ? ~rs_val              // NOT
+                                              : (rs_val ^ rt_val);  // XOR
+            4'hC:    alu_result = rd[3] ? (rs_val << rt_val[3:0]) | (rs_val >> (5'd16 - {1'b0, rt_val[3:0]})) // ROL
+                                        : (rs_val << rt_val[3:0]);  // SHL
+            4'hD:    alu_result = rd[3] ? (rs_val >> rt_val[3:0]) | (rs_val << (5'd16 - {1'b0, rt_val[3:0]})) // ROR
+                                        : (rs_val >> rt_val[3:0]);  // SHR
             default: alu_result = 16'h0000;
         endcase
     end

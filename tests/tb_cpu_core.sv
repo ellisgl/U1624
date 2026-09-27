@@ -85,15 +85,17 @@ module tb_cpu_core;
                 $display("[UART OUTPUT] %0d character(s) transmitted.", uart_len);
             end
 
-            if (sram[30] == 16'h1234 && sram[31] == 16'hABCD &&
-                sram[32] == 16'h002A && sram[33] == 16'h4869) begin
-                $display("[SIMULATION PASSED] Data directives verified:");
-                $display("  .word table[0]=0x%h table[1]=0x%h table[2]=0x%h", sram[30], sram[31], sram[32]);
-                $display("  .byte greeting=0x%h ('Hi')\n", sram[33]);
+            if (sram[30] == 16'h0042 && sram[31] == 16'hFF00 &&
+                sram[32] == 16'hFFFF && sram[33] == 16'h0F10 &&
+                sram[34] == 16'hF001) begin
+                $display("[SIMULATION PASSED] PDP-16 instructions verified:");
+                $display("  MOV=0x%h  NOT=0x%h  NEG=0x%h", sram[30], sram[31], sram[32]);
+                $display("  ROL=0x%h  ROR=0x%h\n", sram[33], sram[34]);
             end else begin
-                $display("[SIMULATION FAILED] Data directive mismatch:");
-                $display("  sram[30]=0x%h (exp 1234) sram[31]=0x%h (exp ABCD)", sram[30], sram[31]);
-                $display("  sram[32]=0x%h (exp 002A) sram[33]=0x%h (exp 4869)\n", sram[32], sram[33]);
+                $display("[SIMULATION FAILED] PDP-16 instruction mismatch:");
+                $display("  MOV: 0x%h (exp 0042)  NOT: 0x%h (exp FF00)", sram[30], sram[31]);
+                $display("  NEG: 0x%h (exp FFFF)  ROL: 0x%h (exp 0F10)", sram[32], sram[33]);
+                $display("  ROR: 0x%h (exp F001)\n", sram[34]);
             end
             $finish;
         end

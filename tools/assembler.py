@@ -91,7 +91,8 @@ def is_instruction(line):
 
 RESERVED_MNEMONICS = (
     set(OPCODES.keys()) | set(BRANCH_CONDITIONS.keys()) |
-    {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD'}
+    {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
+     'MOV', 'NOT', 'NEG', 'ROL', 'ROR'}
 )
 
 def count_directive_words(line):
@@ -268,6 +269,57 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
             word = (OPCODES['LIMM'] << 12) | (rd << 8) | imm8
             return f"{word:04X} // {line}"
 
+        # Handle MOV pseudo-instruction (encodes as OR Rd, Rs, Rs)
+        elif mnemonic == 'MOV':
+            if len(tokens) < 3:
+                raise ValueError(f"MOV requires Destination, Source: '{line}'")
+            rd = parse_register(tokens[1])
+            rs = parse_register(tokens[2])
+            word = (OPCODES['OR'] << 12) | (rs << 8) | (rs << 4) | rd
+            return f"{word:04X} // {line}"
+
+        # Handle NOT (sub-format of XOR: Rs==Rt)
+        elif mnemonic == 'NOT':
+            if len(tokens) < 3:
+                raise ValueError(f"NOT requires Destination, Source: '{line}'")
+            rd = parse_register(tokens[1])
+            rs = parse_register(tokens[2])
+            word = (OPCODES['XOR'] << 12) | (rs << 8) | (rs << 4) | rd
+            return f"{word:04X} // {line}"
+
+        # Handle NEG (sub-format of SUB: Rs==Rt)
+        elif mnemonic == 'NEG':
+            if len(tokens) < 3:
+                raise ValueError(f"NEG requires Destination, Source: '{line}'")
+            rd = parse_register(tokens[1])
+            rs = parse_register(tokens[2])
+            word = (OPCODES['SUB'] << 12) | (rs << 8) | (rs << 4) | rd
+            return f"{word:04X} // {line}"
+
+        # Handle ROL (sub-format of SHL: rd[3]=1, dest R0-R7)
+        elif mnemonic == 'ROL':
+            if len(tokens) < 4:
+                raise ValueError(f"ROL requires 3 registers: '{line}'")
+            rd = parse_register(tokens[1])
+            rs = parse_register(tokens[2])
+            rt = parse_register(tokens[3])
+            if rd > 7:
+                raise ValueError(f"ROL destination limited to R0-R7, got R{rd}")
+            word = (OPCODES['SHL'] << 12) | (rs << 8) | (rt << 4) | (0x8 | rd)
+            return f"{word:04X} // {line}"
+
+        # Handle ROR (sub-format of SHR: rd[3]=1, dest R0-R7)
+        elif mnemonic == 'ROR':
+            if len(tokens) < 4:
+                raise ValueError(f"ROR requires 3 registers: '{line}'")
+            rd = parse_register(tokens[1])
+            rs = parse_register(tokens[2])
+            rt = parse_register(tokens[3])
+            if rd > 7:
+                raise ValueError(f"ROR destination limited to R0-R7, got R{rd}")
+            word = (OPCODES['SHR'] << 12) | (rs << 8) | (rt << 4) | (0x8 | rd)
+            return f"{word:04X} // {line}"
+
         # Handle PUSH Instruction (Opcode=0xE)
         elif mnemonic == 'PUSH':
             if len(tokens) < 2:
@@ -384,34 +436,36 @@ def save_to_hex_file(hex_lines, filename="program.hex"):
 
 if __name__ == "__main__":
     assembly_code = """
-    ; --- Test data directives: .word lookup table and .byte string ---
-
-    ; Load table base address via label
-    LIMM  R0, table        ; R0 = address of lookup table
-    LOAD  R1, [R0 + 0]     ; R1 = table[0] = 0x1234
-    LOAD  R2, [R0 + 1]     ; R2 = table[1] = 0xABCD
-    LOAD  R3, [R0 + 2]     ; R3 = table[2] = 42
-
-    ; Store results to data area for validation
+    ; --- Test MOV, NOT, NEG, ROL, ROR ---
     LIMM  R6, 0x1E         ; R6 = 30 (data area)
-    STORE R1, [R6 + 0]     ; sram[30] = 0x1234
-    STORE R2, [R6 + 1]     ; sram[31] = 0xABCD
-    STORE R3, [R6 + 2]     ; sram[32] = 0x002A (42)
 
-    ; Load string bytes (packed 2 per word)
-    LIMM  R0, greeting     ; R0 = address of greeting
-    LOAD  R4, [R0 + 0]     ; R4 = 0x4869 ('H','i')
+    ; Test MOV: copy R value
+    LIMM  R0, 0x42         ; R0 = 0x0042
+    MOV   R1, R0           ; R1 = R0 = 0x0042
+    STORE R1, [R6 + 0]     ; sram[30] = 0x0042
 
-    STORE R4, [R6 + 3]     ; sram[33] = 0x4869
+    ; Test NOT: bitwise complement
+    LIMM  R0, 0xFF         ; R0 = 0x00FF
+    NOT   R2, R0           ; R2 = ~0x00FF = 0xFF00
+    STORE R2, [R6 + 1]     ; sram[31] = 0xFF00
+
+    ; Test NEG: two's complement negate
+    LIMM  R0, 1            ; R0 = 1
+    NEG   R3, R0           ; R3 = -1 = 0xFFFF
+    STORE R3, [R6 + 2]     ; sram[32] = 0xFFFF
+
+    ; Test ROL: rotate left by 4
+    LIMM  R0, 0xF1         ; R0 = 0x00F1
+    LIMM  R7, 4            ; R7 = shift amount
+    ROL   R4, R0, R7       ; R4 = 0x00F1 ROL 4 = 0x0F10
+    STORE R4, [R6 + 3]     ; sram[33] = 0x0F10
+
+    ; Test ROR: rotate right by 4
+    LIMM  R0, 0x1F         ; R0 = 0x001F
+    ROR   R5, R0, R7       ; R5 = 0x001F ROR 4 = 0xF001
+    STORE R5, [R6 + 4]     ; sram[34] = 0xF001
 
     HALT
-
-    ; --- Data Section ---
-table:
-    .word 0x1234, 0xABCD, 42
-
-greeting:
-    .byte 0x48, 0x69       ; 'H', 'i'
     """
 
     print("--- U1624 Toolchain Assembly ---")
