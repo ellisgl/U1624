@@ -9,7 +9,8 @@ A custom 16-bit softcore CPU targeting FPGA, inspired by the **65C816**, **Z8000
 - **24-bit address bus** (16MB addressable, flat — no segmentation)
 - **Multi-state FSM** execution: FETCH → EXECUTE → MEM_READ/MEM_WRITE → FETCH
 - **Hardware multiply** (16×16→32) and **divide** with divide-by-zero protection
-- **Memory-mapped I/O** at `0xFFF0`–`0xFFFF`
+- **Single-level interrupts** with fixed vector, automatic PC/flag save-restore
+- **Memory-mapped I/O** at `0xFFF0`–`0xFFFF` with UART and timer peripherals
 
 ## Instruction Set
 
@@ -22,7 +23,7 @@ J-Type:  [Opcode (4)][Rs (4)][Imm8 (8)]
 B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 ```
 
-### Instructions
+### Instructions (33 total)
 
 | Category | Mnemonic | Description | Encoding |
 |----------|----------|-------------|----------|
@@ -32,7 +33,7 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | | `LOAD Rt, [Rs+Imm4]` | Load from memory | `0x0` I-Type |
 | | `STORE Rt, [Rs+Imm4]` | Store to memory | `0x1` I-Type |
 | | `PUSH Rs` | Push to stack (pre-decrement SP) | `0xE` |
-| | `POP Rd` | Pop from stack (post-increment SP) | `0x3` |
+| | `POP Rd` | Pop from stack (post-increment SP) | `0x3` J-Type, Imm8=0 |
 | **Arithmetic** | `ADD Rd, Rs, Rt` | Add | `0x4` R-Type |
 | | `ADDI Rt, Rs, Imm4` | Add immediate | `0x5` I-Type |
 | | `SUB Rd, Rs, Rt` | Subtract | `0x8` R-Type |
@@ -68,7 +69,7 @@ ALU and compare instructions set two flags:
 - **Z** (Zero) — result is zero
 - **N** (Negative) — result bit 15 is set
 
-Data transfer instructions (LOAD, STORE, PUSH, POP, LIMM) do not modify flags.
+Data transfer instructions (LOAD, STORE, PUSH, POP, LIMM, LUI) do not modify flags.
 
 ### Interrupts
 
@@ -91,6 +92,7 @@ The `irq` input is active-high and level-sensitive. The CPU checks it at the sta
     ...
 
 int_handler:            ; address 0x0008
+    ; acknowledge interrupt source
     ; handle interrupt
     IRET
 
@@ -98,6 +100,16 @@ start:
     LIMM R15, 60        ; init stack pointer
     SEI                 ; enable interrupts
     ; main program...
+```
+
+### Building 16-bit Addresses
+
+`LIMM` loads an 8-bit value (zeroing the upper byte). To construct a full 16-bit address, pair it with `LUI`:
+
+```asm
+    LIMM R0, 0xF0       ; R0 = 0x00F0
+    LUI  R0, 0xFF       ; R0 = 0xFFF0 (UART TX address)
+    STORE R1, [R0 + 0]  ; write to UART
 ```
 
 ## Project Structure
@@ -108,9 +120,13 @@ U1624/
 │   ├── cpu_core.sv          # CPU core RTL (SystemVerilog)
 │   └── timer.sv             # Countdown timer peripheral
 ├── tests/
-│   └── tb_cpu_core.sv       # Testbench with mock SRAM, UART, and timer
+│   ├── tb_cpu_core.sv       # Testbench with mock SRAM, UART, and timer
+│   ├── test_program.asm     # PDP-16 instruction tests
+│   ├── test_interrupts.asm  # Timer-driven interrupt test
+│   ├── test_lui.asm         # LUI instruction test
+│   └── test_uart_rx.asm     # UART receive test
 ├── tools/
-│   └── assembler.py         # Two-pass assembler with label support
+│   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script
 ```
 
@@ -118,7 +134,7 @@ U1624/
 
 ### Assembler
 
-The Python assembler is a standalone CLI tool supporting symbolic labels, all instructions, and data directives:
+The Python assembler is a standalone CLI tool supporting symbolic labels, all 33 instructions, and data directives:
 
 ```bash
 # Assemble a source file to program.hex (default output)
@@ -146,14 +162,15 @@ multiply:
     RET
 ```
 
-Run the full simulation pipeline:
+### Simulation
+
+Run the full simulation pipeline (assemble → compile RTL → simulate):
 
 ```bash
 bash run_sim.sh                        # uses tests/test_program.asm
-bash run_sim.sh my_program.asm         # uses a custom source file
+bash run_sim.sh tests/test_interrupts.asm  # run a specific test
+bash run_sim.sh my_program.asm         # run a custom program
 ```
-
-This assembles the source, compiles the RTL with Icarus Verilog, and launches the simulation.
 
 ### Requirements
 
@@ -166,15 +183,24 @@ This assembles the source, compiles the RTL with Icarus Verilog, and launches th
 | Address Range | Description |
 |---------------|-------------|
 | `0x000000`–`0x00FFEF` | RAM / Program memory |
-| `0x00FFF0` | UART TX Data (write) |
-| `0x00FFF1` | UART Status (read, bit 0 = TX ready, bit 1 = RX data available) |
+| `0x00FFF0` | UART TX Data (W) |
+| `0x00FFF1` | UART Status (R) — bit 0: TX ready, bit 1: RX data available |
 | `0x00FFF2` | Timer reload value (R/W — also sets count) |
 | `0x00FFF3` | Timer current count (R) |
-| `0x00FFF4` | Timer control (R/W, bit 0: enable, bit 1: auto-reload) |
-| `0x00FFF5` | Timer status (R: bit 0 = fired; W: acknowledge/clear) |
+| `0x00FFF4` | Timer control (R/W) — bit 0: enable, bit 1: auto-reload |
+| `0x00FFF5` | Timer status (R/W) — bit 0: fired; write to acknowledge |
 | `0x00FFF6` | UART RX Data (R: current byte; W: acknowledge/pop) |
-| `0x00FFF7` | UART RX Control (R/W, bit 0: RX interrupt enable) |
+| `0x00FFF7` | UART RX Control (R/W) — bit 0: RX interrupt enable |
 | `0x00FFF8`–`0x00FFFF` | Reserved I/O |
+
+### Interrupt Sources
+
+The CPU's `irq` line is the OR of all peripheral interrupt outputs:
+
+| Source | Trigger | Acknowledge |
+|--------|---------|-------------|
+| Timer | Count reaches zero | Write to `0xFFF5` |
+| UART RX | Data available (when enabled via `0xFFF7` bit 0) | Write to `0xFFF6` |
 
 ## Design Influences
 
