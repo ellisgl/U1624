@@ -83,7 +83,20 @@ U1624/
 
 ### Assembler
 
-The Python assembler supports symbolic labels, all instructions, and data directives:
+The Python assembler is a standalone CLI tool supporting symbolic labels, all instructions, and data directives:
+
+```bash
+# Assemble a source file to program.hex (default output)
+python3 tools/assembler.py my_program.asm
+
+# Specify output file
+python3 tools/assembler.py my_program.asm -o output.hex
+
+# Verbose mode (print word mapping)
+python3 tools/assembler.py my_program.asm -v
+```
+
+Example assembly:
 
 ```asm
     LIMM  R15, 60          ; Initialize stack pointer
@@ -98,13 +111,14 @@ multiply:
     RET
 ```
 
-Edit the `assembly_code` string in `tools/assembler.py`, then:
+Run the full simulation pipeline:
 
 ```bash
-bash run_sim.sh
+bash run_sim.sh                        # uses tests/test_program.asm
+bash run_sim.sh my_program.asm         # uses a custom source file
 ```
 
-This runs the assembler, compiles the RTL with Icarus Verilog, and launches the simulation.
+This assembles the source, compiles the RTL with Icarus Verilog, and launches the simulation.
 
 ### Requirements
 
