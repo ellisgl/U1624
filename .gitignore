@@ -1,0 +1,6 @@
+# Simulation outputs
+sim.out
+simulation_waves.vcd
+
+# Generated machine code
+program.hex
