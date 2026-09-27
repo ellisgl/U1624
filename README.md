@@ -23,7 +23,7 @@ J-Type:  [Opcode (4)][Rs (4)][Imm8 (8)]
 B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 ```
 
-### Instructions (33 total)
+### Instructions (35 total)
 
 | Category | Mnemonic | Description | Encoding |
 |----------|----------|-------------|----------|
@@ -37,6 +37,8 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | **Arithmetic** | `ADD Rd, Rs, Rt` | Add | `0x4` R-Type |
 | | `ADDI Rt, Rs, Imm4` | Add immediate | `0x5` I-Type |
 | | `SUB Rd, Rs, Rt` | Subtract | `0x8` R-Type |
+| | `ADC Rd, Rs, Rt` | Add with carry | `0x4` ext, Rd R0–R7 |
+| | `SBC Rd, Rs, Rt` | Subtract with borrow | `0x8` ext, Rd R0–R7 |
 | | `NEG Rd, Rs` | Two's complement negate | SUB with Rs==Rt |
 | | `MUL Rd, Rs, Rt` | Multiply (low 16 bits) | `0xF` ext, Rd R0–R7 |
 | | `MULH Rd, Rs, Rt` | Multiply (high 16 bits) | `0xF` ext, Rd R0–R7 |
@@ -65,11 +67,12 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 
 ### Flags
 
-ALU and compare instructions set two flags:
+ALU and compare instructions set three flags:
 - **Z** (Zero) — result is zero
 - **N** (Negative) — result bit 15 is set
+- **C** (Carry) — set by ADD/ADC/SUB/SBC/ADDI/CMPI (6502 convention: C=1 on ADD overflow, C=1 on SUB when no borrow)
 
-Data transfer instructions (LOAD, STORE, PUSH, POP, LIMM, LUI) do not modify flags.
+ADC and SBC use the carry flag as input for multi-word arithmetic chains. Data transfer instructions (LOAD, STORE, PUSH, POP, LIMM, LUI) do not modify flags.
 
 ### Interrupts
 
@@ -124,7 +127,9 @@ U1624/
 │   ├── test_program.asm     # PDP-16 instruction tests
 │   ├── test_interrupts.asm  # Timer-driven interrupt test
 │   ├── test_lui.asm         # LUI instruction test
-│   └── test_uart_rx.asm     # UART receive test
+│   ├── test_uart_rx.asm     # UART receive test
+│   ├── test_carry.asm       # Carry flag and BCS/BCC test
+│   └── test_adc_sbc.asm     # ADC/SBC multi-word arithmetic test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script

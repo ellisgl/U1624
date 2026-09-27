@@ -1,136 +1,292 @@
+// =============================================================================
+// U1624 CPU Core
+// =============================================================================
+//
+// A 16-bit softcore CPU with a fixed-length instruction set, designed for
+// FPGA implementation and as a teaching tool for CPU architecture.
+//
+// Key concepts demonstrated:
+//   - Finite State Machine (FSM) based control — the CPU steps through states
+//     to fetch, decode, and execute each instruction
+//   - Register file — 16 general-purpose 16-bit registers (like a small scratchpad)
+//   - Arithmetic Logic Unit (ALU) — performs math and logic operations
+//   - Memory-mapped I/O — peripherals (UART, timer) appear as memory addresses
+//   - Interrupts — hardware signals that pause the program to handle events
+//
+// How a CPU works (simplified):
+//   1. FETCH:   Read the next instruction from memory at the Program Counter (PC)
+//   2. DECODE:  Break the instruction into fields (opcode, registers, immediates)
+//   3. EXECUTE: Perform the operation (ALU math, memory access, branch, etc.)
+//   4. Repeat from step 1
+//
+// This CPU combines decode and execute into one state for simplicity, and adds
+// extra states for multi-cycle operations like memory reads/writes and interrupts.
+//
+// =============================================================================
+
 `timescale 1ns / 1ps
 
 module cpu_core (
-    input  wire        clk,
-    input  wire        rst_n,
+    input  wire        clk,       // Clock — the heartbeat that drives all state changes
+    input  wire        rst_n,     // Active-low reset — when 0, CPU resets to initial state
 
-    // Memory Interface
-    output reg  [23:0] mem_addr,
-    input  wire [15:0] mem_read_data,
-    output reg  [15:0] mem_write_data,
-    output reg         mem_write_en,
+    // Memory Interface — how the CPU talks to RAM and I/O devices
+    // The CPU puts an address on mem_addr and either reads data from mem_read_data
+    // or writes data via mem_write_data + mem_write_en.
+    output reg  [23:0] mem_addr,       // Address bus (24-bit = 16MB addressable space)
+    input  wire [15:0] mem_read_data,  // Data coming IN from memory/peripherals
+    output reg  [15:0] mem_write_data, // Data going OUT to memory/peripherals
+    output reg         mem_write_en,   // Write enable — 1 = writing, 0 = reading
 
-    // Interrupt Interface
+    // Interrupt Interface — external signal to request CPU attention
+    // When irq is high and interrupts are enabled, the CPU will pause the current
+    // program and jump to the interrupt handler at address 0x0008.
     input  wire        irq
 );
 
+    // =========================================================================
     // FSM States
-    localparam [3:0] S_FETCH          = 4'd0,
-                     S_EXECUTE        = 4'd1,
-                     S_MEM_READ       = 4'd2,
-                     S_MEM_WRITE      = 4'd3,
-                     S_HALTED         = 4'd4,
-                     S_INT_PUSH_PC    = 4'd5,
-                     S_INT_PUSH_FLAGS = 4'd6,
-                     S_IRET_FLAGS     = 4'd7;
+    // =========================================================================
+    // The CPU is a Finite State Machine. Each clock cycle it's in exactly one
+    // state. The state determines what the CPU does that cycle.
+    //
+    // Normal instruction flow: FETCH → EXECUTE → (back to FETCH, or MEM_READ/WRITE)
+    // Interrupt flow:          FETCH → INT_PUSH_PC → INT_PUSH_FLAGS → MEM_WRITE → FETCH
+    // Return from interrupt:   EXECUTE(IRET) → IRET_FLAGS → MEM_READ → FETCH
+    //
+    // We use 4 bits for the state register since we have 8 states (3 bits would
+    // suffice, but 4 bits leaves room for future expansion).
+    localparam [3:0] S_FETCH          = 4'd0, // Read instruction from memory
+                     S_EXECUTE        = 4'd1, // Decode + execute the instruction
+                     S_MEM_READ       = 4'd2, // Wait for memory read to complete
+                     S_MEM_WRITE      = 4'd3, // Wait for memory write to complete
+                     S_HALTED         = 4'd4, // CPU stopped (HALT instruction)
+                     S_INT_PUSH_PC    = 4'd5, // Interrupt: save return address
+                     S_INT_PUSH_FLAGS = 4'd6, // Interrupt: save CPU flags
+                     S_IRET_FLAGS     = 4'd7; // Interrupt return: restore flags
 
-    // Interrupt vector address
+    // Fixed address where the interrupt handler must be located.
+    // When an interrupt fires, the CPU jumps here. The programmer must place
+    // their interrupt service routine (ISR) at this address.
     localparam [23:0] INT_VECTOR = 24'h000008;
 
-    // Program Counter
+    // =========================================================================
+    // CPU Registers
+    // =========================================================================
+
+    // Program Counter — holds the address of the NEXT instruction to fetch.
+    // 24 bits wide, giving access to 16MB of address space.
     reg [23:0] pc;
 
-    // Register File: 16 general-purpose 16-bit registers
+    // Register File — 16 general-purpose 16-bit registers.
+    // These are the CPU's fast working storage. Instructions read operands from
+    // registers and write results back to registers. Much faster than memory.
+    // R0–R14: general purpose (use for anything)
+    // R15:    Stack Pointer (SP) — used by PUSH, POP, CALL, RET, and interrupts
     reg [15:0] rf [0:15];
 
-    // Pipeline Buffer: Instruction Register
+    // Instruction Register — holds the instruction currently being executed.
+    // Latched during FETCH so it stays stable during EXECUTE.
     reg [15:0] instr_reg;
 
-    // FSM State
+    // FSM state register — which state the CPU is currently in.
     reg [3:0] state;
 
-    // Interrupt enable flag
+    // Interrupt enable flag — controls whether the CPU responds to IRQ.
+    // Set by SEI (Set Enable Interrupts), cleared by CLI (Clear Interrupts).
+    // Also cleared automatically on interrupt entry (prevents nested interrupts)
+    // and restored on IRET (interrupt return).
     reg int_enable;
 
-    // Instruction Register wire slices
+    // =========================================================================
+    // Instruction Decode — Wire Slices
+    // =========================================================================
+    // Every instruction is 16 bits. We use "wire slices" to extract the fields.
+    // This is purely combinational — no logic, just selecting bits. The hardware
+    // equivalent of looking at different parts of the same number.
+    //
+    // The instruction formats are:
+    //   R-Type:  [Opcode(4)][Rs(4)][Rt(4)][Rd(4)]     — register operations
+    //   I-Type:  [Opcode(4)][Rs(4)][Rt(4)][Imm4(4)]   — immediate operations
+    //   J-Type:  [Opcode(4)][Rs(4)][Imm8(8)]           — wide immediate
+    //   B-Type:  [Opcode(4)][Cond(4)][Offset8(8)]      — branches
+    //
+    // All formats share the same opcode position, so we can always decode it.
     wire [15:0] instr  = instr_reg;
-    wire [3:0]  opcode = instr[15:12];
-    wire [3:0]  rs     = instr[11:8];
-    wire [3:0]  rt     = instr[7:4];
-    wire [3:0]  rd     = instr[3:0];
-    wire [3:0]  imm4   = instr[3:0];
-    wire [7:0]  imm8   = instr[7:0];
-    wire [3:0]  cond   = instr[11:8];
+    wire [3:0]  opcode = instr[15:12]; // What operation to perform
+    wire [3:0]  rs     = instr[11:8];  // First source register (or destination)
+    wire [3:0]  rt     = instr[7:4];   // Second source register
+    wire [3:0]  rd     = instr[3:0];   // Destination register
+    wire [3:0]  imm4   = instr[3:0];   // 4-bit immediate value (shares bits with rd)
+    wire [7:0]  imm8   = instr[7:0];   // 8-bit immediate value (shares bits with rt+rd)
+    wire [3:0]  cond   = instr[11:8];  // Branch condition code (shares bits with rs)
 
-    // Internal execution buses
-    wire [15:0] rs_val = rf[rs];
-    wire [15:0] rt_val = rf[rt];
-    reg  [15:0] alu_result;
-    reg  [16:0] alu_wide;
-    reg         alu_carry;
-    wire [15:0] ext_b      = rf[rt[2:0]]; // Second operand for extended ops (R0-R7)
+    // =========================================================================
+    // Internal Data Buses
+    // =========================================================================
+    // These wires carry data between the register file, ALU, and other units.
+
+    // Register read ports — reading from the register file is instant (combinational).
+    // We can read two registers simultaneously, which is needed for operations
+    // like ADD Rd, Rs, Rt (need both Rs and Rt values at the same time).
+    wire [15:0] rs_val = rf[rs]; // Value of register Rs
+    wire [15:0] rt_val = rf[rt]; // Value of register Rt
+
+    // ALU output signals
+    reg  [15:0] alu_result; // 16-bit result of the ALU operation
+    reg  [16:0] alu_wide;   // 17-bit intermediate — the extra bit captures carry/borrow
+    reg         alu_carry;  // Carry flag output from the ALU
+
+    // Extended ALU operand — for MUL/DIV, the second operand is restricted
+    // to R0–R7 (3-bit register select using lower 3 bits of rt field).
+    wire [15:0] ext_b = rf[rt[2:0]];
+
+    // Hardware multiply — combinational (single-cycle) 16×16 → 32-bit multiply.
+    // The full 32-bit result is split: MUL gets the low 16, MULH gets the high 16.
     wire [31:0] mul_result = rs_val * ext_b;
-    wire [15:0] div_quot   = (ext_b != 0) ? rs_val / ext_b : 16'h0000;
-    wire [15:0] div_rem    = (ext_b != 0) ? rs_val % ext_b : 16'h0000;
-    reg         take_branch;
 
+    // Hardware divide — combinational with divide-by-zero protection.
+    // Returns 0 for both quotient and remainder if dividing by zero.
+    wire [15:0] div_quot = (ext_b != 0) ? rs_val / ext_b : 16'h0000;
+    wire [15:0] div_rem  = (ext_b != 0) ? rs_val % ext_b : 16'h0000;
+
+    // Branch decision — set by the branch condition evaluator (see below).
+    reg take_branch;
+
+    // =========================================================================
     // Status Flags
-    reg flag_z;
-    reg flag_n;
-    reg flag_c;
+    // =========================================================================
+    // Flags record properties of the most recent ALU result. Branch instructions
+    // test these flags to decide whether to jump. Only ALU and compare
+    // instructions update flags — data moves (LOAD, STORE, etc.) do NOT.
+    //
+    // This is a common CPU design pattern. It lets you do something like:
+    //   SUB R0, R1, R2    ← sets flags based on the subtraction result
+    //   BEQ label          ← branches if the result was zero (R1 == R2)
 
-    // Main FSM
-    integer i;
-    reg [15:0] next_sp;
+    reg flag_z; // Zero flag:     1 if the result was zero
+    reg flag_n; // Negative flag: 1 if the result's highest bit (bit 15) was set
+    reg flag_c; // Carry flag:    1 if the operation produced a carry or no borrow
+                //   ADD: C=1 means unsigned overflow (result > 65535)
+                //   SUB: C=1 means no borrow (Rs >= Rt), like the 6502 processor
+
+    // =========================================================================
+    // Main FSM — Sequential Logic
+    // =========================================================================
+    // Everything inside this always block happens on the rising edge of the clock
+    // (posedge clk) or when reset goes low (negedge rst_n).
+    //
+    // This is the "brain" of the CPU. Each state performs one step of work,
+    // then transitions to the next state.
+
+    integer i;           // Loop variable for register file initialization
+    reg [15:0] next_sp;  // Temporary for stack pointer calculation (blocking assign)
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            pc             <= 24'h000000;
+            // =================================================================
+            // Reset — initialize everything to a known state
+            // =================================================================
+            // When rst_n goes low, the CPU resets immediately regardless of
+            // what it was doing. This is asynchronous reset (negedge rst_n).
+            pc             <= 24'h000000;  // Start executing from address 0
             instr_reg      <= 16'h0000;
-            state          <= S_FETCH;
+            state          <= S_FETCH;     // Begin by fetching the first instruction
             flag_z         <= 1'b0;
             flag_n         <= 1'b0;
             flag_c         <= 1'b0;
             mem_addr       <= 24'h000000;
             mem_write_data <= 16'h0000;
             mem_write_en   <= 1'b0;
-            int_enable     <= 1'b0;
+            int_enable     <= 1'b0;        // Interrupts disabled on reset
 
+            // Clear all 16 registers to zero
             for (i = 0; i < 16; i = i + 1)
                 rf[i] <= 16'h0000;
         end else begin
             case (state)
+                // =============================================================
+                // FETCH — Read the next instruction from memory
+                // =============================================================
+                // On the previous cycle, we set mem_addr = PC, so mem_read_data
+                // now contains the instruction at that address.
+                //
+                // Before fetching, we check for pending interrupts. If an IRQ
+                // is active and interrupts are enabled, we divert to the
+                // interrupt entry sequence instead of executing the next
+                // instruction. This ensures interrupts are handled between
+                // instructions, never mid-instruction.
                 S_FETCH: begin
                     if (irq && int_enable) begin
+                        // Interrupt requested! Enter the interrupt sequence.
                         state <= S_INT_PUSH_PC;
                     end else begin
+                        // Normal fetch: latch the instruction and move to execute.
                         instr_reg    <= mem_read_data;
-                        mem_write_en <= 1'b0;
-                        mem_addr     <= pc;
+                        mem_write_en <= 1'b0;     // Not writing to memory
+                        mem_addr     <= pc;        // Set up address for next fetch
                         state        <= S_EXECUTE;
                     end
                 end
 
+                // =============================================================
+                // EXECUTE — Decode and execute the instruction
+                // =============================================================
+                // This is the biggest state. We look at the opcode to determine
+                // what to do. Some instructions complete in this single cycle
+                // (LIMM, ALU ops, branches). Others need an additional cycle
+                // for memory access (LOAD, STORE, PUSH, POP, CALL, RET).
                 S_EXECUTE: begin
                     case (opcode)
-                        4'h0: begin // LOAD Rt, [Rs + Imm4]
+                        // ----- LOAD Rt, [Rs + Imm4] -----
+                        // Read a value from memory into a register.
+                        // Address = Rs register value + 4-bit offset.
+                        // Needs an extra cycle (S_MEM_READ) to wait for memory.
+                        4'h0: begin
                             mem_addr <= {8'h00, rs_val} + {20'h00000, imm4};
                             pc       <= pc + 1;
                             state    <= S_MEM_READ;
                         end
 
-                        4'h1: begin // STORE Rt, [Rs + Imm4]
+                        // ----- STORE Rt, [Rs + Imm4] -----
+                        // Write a register value to memory.
+                        // Address = Rs register value + 4-bit offset.
+                        4'h1: begin
                             mem_addr       <= {8'h00, rs_val} + {20'h00000, imm4};
                             mem_write_data <= rt_val;
-                            mem_write_en   <= 1'b1;
+                            mem_write_en   <= 1'b1; // Tell memory we're writing
                             pc             <= pc + 1;
                             state          <= S_MEM_WRITE;
                         end
 
-                        4'h2: begin // LIMM Rs, Imm8
-                            rf[rs]   <= {8'h00, imm8};
+                        // ----- LIMM Rs, Imm8 -----
+                        // Load an 8-bit immediate value into a register.
+                        // The upper byte is zeroed. Use LUI after this to set
+                        // the upper byte for full 16-bit constants.
+                        4'h2: begin
+                            rf[rs]   <= {8'h00, imm8}; // Zero-extend to 16 bits
                             pc       <= pc + 1;
-                            mem_addr <= pc + 1;
+                            mem_addr <= pc + 1;  // Pre-set address for next fetch
                             state    <= S_FETCH;
                         end
-                        
-                        4'h3: begin // POP Rd (imm8=0) or LUI Rd, Imm8 (imm8≠0)
-                            if (imm8 == 8'h00) begin // POP
+
+                        // ----- POP Rd (imm8=0) or LUI Rd, Imm8 (imm8≠0) -----
+                        // Two instructions share this opcode, distinguished by imm8:
+                        //   imm8 = 0: POP — read value from stack into Rd
+                        //   imm8 ≠ 0: LUI — load upper immediate, keeping lower byte
+                        //
+                        // LUI + LIMM together build 16-bit constants:
+                        //   LIMM R0, 0xF0   → R0 = 0x00F0
+                        //   LUI  R0, 0xFF   → R0 = 0xFFF0
+                        4'h3: begin
+                            if (imm8 == 8'h00) begin
+                                // POP: read from address in SP, then increment SP
                                 mem_addr <= {8'h00, rf[15]};
-                                rf[15]   <= rf[15] + 1;
+                                rf[15]   <= rf[15] + 1;  // Post-increment stack pointer
                                 pc       <= pc + 1;
                                 state    <= S_MEM_READ;
-                            end else begin // LUI — load upper immediate, preserve lower byte
+                            end else begin
+                                // LUI: replace upper byte, preserve lower byte
                                 rf[rs]   <= {imm8, rf[rs][7:0]};
                                 pc       <= pc + 1;
                                 mem_addr <= pc + 1;
@@ -138,21 +294,45 @@ module cpu_core (
                             end
                         end
 
-                        4'h4, 4'h8, 4'h9, 4'hA, 4'hB, 4'hC, 4'hD: begin // ALU R-type
-                            if ((opcode == 4'hC || opcode == 4'hD) && rd[3])
-                                rf[rd[2:0]] <= alu_result; // ROL/ROR dest R0-R7
+                        // ----- ALU R-Type Operations -----
+                        // ADD/ADC(4), SUB/SBC(8), AND(9), OR(A), XOR/NOT(B),
+                        // SHL/ROL(C), SHR/ROR(D)
+                        //
+                        // The ALU result is computed combinationally (see the ALU
+                        // section below). Here we just write the result to the
+                        // destination register and update flags.
+                        //
+                        // Several opcodes use rd[3] as a variant selector:
+                        //   ADD with rd[3]=1 → ADC (add with carry)
+                        //   SUB with rd[3]=1 → SBC (subtract with carry/borrow)
+                        //   SHL with rd[3]=1 → ROL (rotate left)
+                        //   SHR with rd[3]=1 → ROR (rotate right)
+                        // When rd[3] is set, the destination wraps to R0–R7.
+                        4'h4, 4'h8, 4'h9, 4'hA, 4'hB, 4'hC, 4'hD: begin
+                            if ((opcode == 4'h4 || opcode == 4'h8 ||
+                                 opcode == 4'hC || opcode == 4'hD) && rd[3])
+                                rf[rd[2:0]] <= alu_result; // ADC/SBC/ROL/ROR dest R0-R7
                             else
                                 rf[rd] <= alu_result;
+
+                            // Update Zero and Negative flags for all ALU ops
                             flag_z   <= (alu_result == 16'h0000);
                             flag_n   <= alu_result[15];
+
+                            // Carry flag only updated for ADD and SUB
                             if (opcode == 4'h4 || opcode == 4'h8)
                                 flag_c <= alu_carry;
+
                             pc       <= pc + 1;
                             mem_addr <= pc + 1;
                             state    <= S_FETCH;
                         end
 
-                        4'h5: begin // ADDI Rt, Rs, Imm4 — or CMPI Rs, Imm4 when Rt == 0
+                        // ----- ADDI Rt, Rs, Imm4 / CMPI Rs, Imm4 -----
+                        // When Rt ≠ 0: ADDI — add 4-bit immediate to Rs, store in Rt
+                        // When Rt = 0: CMPI — compare Rs against Imm4 (sets flags only,
+                        //              no result stored; "compare" = subtract and discard)
+                        4'h5: begin
                             if (rt != 4'h0)
                                 rf[rt] <= alu_result;
                             flag_z   <= (alu_result == 16'h0000);
@@ -163,7 +343,15 @@ module cpu_core (
                             state    <= S_FETCH;
                         end
 
-                        4'h6: begin // BRANCH Cond, Offset8
+                        // ----- BRANCH Cond, Offset8 -----
+                        // Conditional branch — if the condition is met, jump to
+                        // PC + signed_offset. Otherwise continue to next instruction.
+                        //
+                        // The offset is sign-extended from 8 to 24 bits, allowing
+                        // branches ±127 instructions from current position.
+                        // {{16{imm8[7]}}, imm8} is sign extension: it replicates
+                        // the sign bit (bit 7) to fill the upper 16 bits.
+                        4'h6: begin
                             if (take_branch) begin
                                 pc       <= pc + {{16{imm8[7]}}, imm8};
                                 mem_addr <= pc + {{16{imm8[7]}}, imm8};
@@ -174,43 +362,66 @@ module cpu_core (
                             state <= S_FETCH;
                         end
 
-                        4'h7: begin // CALL, RET, IRET, SEI, CLI (Opcode 0x7)
-                            if (instr[11:0] == 12'h000) begin // RET
+                        // ----- CALL, RET, IRET, SEI, CLI -----
+                        // Multiple instructions packed under opcode 0x7,
+                        // distinguished by the lower 12 bits.
+                        //
+                        // This encoding trick saves opcode space — with only
+                        // 4 bits for the opcode (16 possible values), we need
+                        // to be creative about fitting all instructions.
+                        4'h7: begin
+                            if (instr[11:0] == 12'h000) begin
+                                // RET — return from subroutine
+                                // Pop the return address from the stack into PC.
                                 mem_addr <= {8'h00, rf[15]};
-                                rf[15]   <= rf[15] + 1;
+                                rf[15]   <= rf[15] + 1; // Post-increment SP
                                 state    <= S_MEM_READ;
-                            end else if (instr[11:0] == 12'h001) begin // IRET
+                            end else if (instr[11:0] == 12'h001) begin
+                                // IRET — return from interrupt
+                                // First restore flags (S_IRET_FLAGS), then PC.
                                 mem_addr <= {8'h00, rf[15]};
                                 rf[15]   <= rf[15] + 1;
                                 state    <= S_IRET_FLAGS;
-                            end else if (instr[11:0] == 12'h002) begin // SEI
+                            end else if (instr[11:0] == 12'h002) begin
+                                // SEI — Set Enable Interrupts
                                 int_enable <= 1'b1;
                                 pc         <= pc + 1;
                                 mem_addr   <= pc + 1;
                                 state      <= S_FETCH;
-                            end else if (instr[11:0] == 12'h003) begin // CLI
+                            end else if (instr[11:0] == 12'h003) begin
+                                // CLI — Clear (disable) Interrupts
                                 int_enable <= 1'b0;
                                 pc         <= pc + 1;
                                 mem_addr   <= pc + 1;
                                 state      <= S_FETCH;
                             end else begin
-                                // --- CALL Rs EXECUTION ---
+                                // CALL Rs — call subroutine at address in Rs
+                                // Push the return address (PC+1) onto the stack,
+                                // then jump to the address in Rs.
+                                //
+                                // Stack grows downward: SP is decremented before
+                                // writing (pre-decrement), like x86 and ARM.
+                                // Note: next_sp uses blocking assignment (=) so
+                                // it's available immediately in this same cycle.
                                 next_sp  = rf[15] - 1;
                                 rf[15]          <= next_sp;
 
                                 mem_addr        <= {8'h00, next_sp};
-                                mem_write_data  <= pc + 1;
+                                mem_write_data  <= pc + 1;    // Return address
                                 mem_write_en    <= 1'b1;
 
-                                pc              <= {8'h00, rs_val};
+                                pc              <= {8'h00, rs_val}; // Jump to target
                                 state           <= S_MEM_WRITE;
                             end
                         end
 
-                        4'hE: begin // PUSH Rs
-                            next_sp         = rf[15] - 1; // Removed 'reg [15:0]' keyword
+                        // ----- PUSH Rs -----
+                        // Push a register value onto the stack.
+                        // Pre-decrement SP, then write the value.
+                        4'hE: begin
+                            next_sp         = rf[15] - 1;
                             rf[15]          <= next_sp;
-                            
+
                             mem_addr        <= {8'h00, next_sp};
                             mem_write_data  <= rs_val;
                             mem_write_en    <= 1'b1;
@@ -218,28 +429,35 @@ module cpu_core (
                             state           <= S_MEM_WRITE;
                         end
 
+                        // ----- Extended ALU (opcode 0xF) -----
+                        // HALT or MUL/MULH/DIV/MOD operations.
+                        // These use a 2-bit selector from rt[3] and rd[3]:
+                        //   00 = MUL  (low 16 bits of multiply)
+                        //   01 = MULH (high 16 bits of multiply)
+                        //   10 = DIV  (quotient)
+                        //   11 = MOD  (remainder)
                         4'hF: begin
-                            if (instr[11:0] == 12'h000) begin // HALT
+                            if (instr[11:0] == 12'h000) begin
+                                // HALT — stop the CPU. Only a reset can restart it.
                                 state <= S_HALTED;
                             end else begin
-                                // Extended ALU: rt[3] selects mul(0)/div(1), rd[3] selects variant
                                 case ({rt[3], rd[3]})
-                                    2'b00: begin // MUL Rd, Rs, Rt
+                                    2'b00: begin // MUL Rd, Rs, Rt — low 16 bits
                                         rf[rd[2:0]] <= mul_result[15:0];
                                         flag_z      <= (mul_result[15:0] == 16'h0000);
                                         flag_n      <= mul_result[15];
                                     end
-                                    2'b01: begin // MULH Rd, Rs, Rt
+                                    2'b01: begin // MULH Rd, Rs, Rt — high 16 bits
                                         rf[rd[2:0]] <= mul_result[31:16];
                                         flag_z      <= (mul_result[31:16] == 16'h0000);
                                         flag_n      <= mul_result[31];
                                     end
-                                    2'b10: begin // DIV Rd, Rs, Rt
+                                    2'b10: begin // DIV Rd, Rs, Rt — quotient
                                         rf[rd[2:0]] <= div_quot;
                                         flag_z      <= (div_quot == 16'h0000);
                                         flag_n      <= div_quot[15];
                                     end
-                                    2'b11: begin // MOD Rd, Rs, Rt
+                                    2'b11: begin // MOD Rd, Rs, Rt — remainder
                                         rf[rd[2:0]] <= div_rem;
                                         flag_z      <= (div_rem == 16'h0000);
                                         flag_n      <= div_rem[15];
@@ -251,6 +469,7 @@ module cpu_core (
                             end
                         end
 
+                        // Unknown opcode — skip and continue
                         default: begin
                             pc       <= pc + 1;
                             mem_addr <= pc + 1;
@@ -259,61 +478,110 @@ module cpu_core (
                     endcase
                 end
 
+                // =============================================================
+                // MEM_READ — Complete a memory read operation
+                // =============================================================
+                // We get here after LOAD, POP, RET, or IRET requested a read.
+                // The memory has had one clock cycle to respond, so mem_read_data
+                // now contains the value at the address we set in the previous state.
+                //
+                // What we do with the data depends on which instruction started
+                // the read — we check the opcode and instruction bits to decide.
                 S_MEM_READ: begin
                     if (opcode == 4'h3) begin
-                        rf[rs]   <= mem_read_data; // POP target
+                        // POP — write the popped value to the destination register
+                        rf[rs]   <= mem_read_data;
                         mem_addr <= pc;
                     end else if (opcode == 4'h7 && instr[11:0] == 12'h000) begin
-                        pc       <= {8'h00, mem_read_data}; // RET
+                        // RET — the value is the return address; load it into PC
+                        pc       <= {8'h00, mem_read_data};
                         mem_addr <= {8'h00, mem_read_data};
                     end else if (opcode == 4'h7 && instr[11:0] == 12'h001) begin
-                        pc       <= {8'h00, mem_read_data}; // IRET — restore PC
+                        // IRET (second phase) — restore PC from stack
+                        pc       <= {8'h00, mem_read_data};
                         mem_addr <= {8'h00, mem_read_data};
                     end else begin
-                        rf[rt]   <= mem_read_data; // LOAD target
+                        // LOAD — write the loaded value to the destination register
+                        rf[rt]   <= mem_read_data;
                         mem_addr <= pc;
                     end
                     state    <= S_FETCH;
                 end
 
+                // =============================================================
+                // MEM_WRITE — Complete a memory write operation
+                // =============================================================
+                // The write was initiated in the previous state. Here we just
+                // deassert the write enable and return to FETCH.
                 S_MEM_WRITE: begin
-                    mem_write_en <= 1'b0;
-                    mem_addr     <= pc;
+                    mem_write_en <= 1'b0;  // Done writing
+                    mem_addr     <= pc;     // Set up address for next fetch
                     state        <= S_FETCH;
                 end
 
+                // =============================================================
+                // Interrupt Entry — Push PC and Flags to Stack
+                // =============================================================
+                // When an interrupt is detected, we need to save the CPU's state
+                // so we can restore it later with IRET. This is a 2-step process:
+                //
+                // Step 1 (S_INT_PUSH_PC): Push the current PC to the stack.
+                //   This is the address the CPU will return to after the interrupt.
+                //
+                // Step 2 (S_INT_PUSH_FLAGS): Push the flags (Z, N, C) to the stack.
+                //   Then disable interrupts (prevent nesting) and jump to the
+                //   interrupt vector (0x0008).
+                //
+                // After these two pushes, the stack looks like:
+                //   [SP]     → flags  (pushed last, popped first by IRET)
+                //   [SP + 1] → PC     (pushed first, popped second by IRET)
+
                 S_INT_PUSH_PC: begin
+                    // Push PC onto the stack (pre-decrement SP)
                     next_sp         = rf[15] - 1;
                     rf[15]          <= next_sp;
                     mem_addr        <= {8'h00, next_sp};
-                    mem_write_data  <= pc[15:0];
+                    mem_write_data  <= pc[15:0];   // Save return address
                     mem_write_en    <= 1'b1;
                     state           <= S_INT_PUSH_FLAGS;
                 end
 
                 S_INT_PUSH_FLAGS: begin
+                    // Push flags onto the stack (pre-decrement SP)
                     next_sp         = rf[15] - 1;
                     rf[15]          <= next_sp;
                     mem_addr        <= {8'h00, next_sp};
-                    mem_write_data  <= {13'b0, flag_c, flag_n, flag_z};
+                    mem_write_data  <= {13'b0, flag_c, flag_n, flag_z}; // Pack flags
                     mem_write_en    <= 1'b1;
-                    int_enable      <= 1'b0;
-                    pc              <= INT_VECTOR;
-                    state           <= S_MEM_WRITE;
+                    int_enable      <= 1'b0;       // Disable interrupts during handler
+                    pc              <= INT_VECTOR;  // Jump to interrupt handler (0x0008)
+                    state           <= S_MEM_WRITE; // Finish the write, then FETCH
                 end
 
+                // =============================================================
+                // Interrupt Return — Restore Flags
+                // =============================================================
+                // IRET pops flags then PC from the stack (reverse of push order).
+                // This state handles the flags; it then transitions to MEM_READ
+                // which handles the PC restoration.
                 S_IRET_FLAGS: begin
+                    // Restore flags from the value we just read from the stack
                     flag_z     <= mem_read_data[0];
                     flag_n     <= mem_read_data[1];
                     flag_c     <= mem_read_data[2];
-                    int_enable <= 1'b1;
+                    int_enable <= 1'b1;            // Re-enable interrupts
+
+                    // Set up to pop the return address (PC) next
                     mem_addr   <= {8'h00, rf[15]};
-                    rf[15]     <= rf[15] + 1;
-                    state      <= S_MEM_READ;
+                    rf[15]     <= rf[15] + 1;      // Post-increment SP
+                    state      <= S_MEM_READ;      // MEM_READ will load PC
                 end
 
+                // =============================================================
+                // HALTED — CPU is stopped
+                // =============================================================
+                // The CPU stays here until reset. No instructions execute.
                 S_HALTED: begin
-                    // Permanently stopped
                 end
 
                 default: state <= S_FETCH;
@@ -321,44 +589,94 @@ module cpu_core (
         end
     end
 
-    // Combinatorial ALU (selected by opcode, not a shared funct field)
+    // =========================================================================
+    // Combinational ALU
+    // =========================================================================
+    // The ALU (Arithmetic Logic Unit) computes results combinationally — meaning
+    // the output updates instantly whenever the inputs change, with no clock needed.
+    // This is like a complex calculator circuit that always shows the answer.
+    //
+    // The EXECUTE state reads alu_result and decides whether to use it.
+    // The ALU computes a result for EVERY cycle, but it's only written to a
+    // register when the current instruction actually needs it.
+    //
+    // For carry detection, we use a 17-bit intermediate (alu_wide). The 17th bit
+    // captures carry out of the 16-bit addition, which tells us if the result
+    // overflowed the 16-bit range.
+    //
+    // Carry convention (6502-style):
+    //   ADD: C = 1 when the result wraps around (unsigned overflow)
+    //   SUB: C = 1 when there's NO borrow (Rs >= Rt)
+    //        C = 0 when there IS a borrow (Rs < Rt)
+    //   This is computed as: Rs + (~Rt) + 1 (two's complement subtraction)
+    //   The carry out of this addition is naturally 1 when Rs >= Rt.
+
     always @(*) begin
         alu_carry = 1'b0;
         case (opcode)
-            4'h4: begin // ADD
-                alu_wide  = {1'b0, rs_val} + {1'b0, rt_val};
+            4'h4: begin // ADD or ADC (rd[3]=1)
+                // ADD: Rs + Rt
+                // ADC: Rs + Rt + Carry (for multi-word addition chains)
+                if (rd[3])
+                    alu_wide = {1'b0, rs_val} + {1'b0, rt_val} + {16'b0, flag_c};
+                else
+                    alu_wide = {1'b0, rs_val} + {1'b0, rt_val};
                 alu_result = alu_wide[15:0];
-                alu_carry  = alu_wide[16];
+                alu_carry  = alu_wide[16]; // Carry = overflow bit
             end
             4'h5: begin // ADDI or CMPI
                 if (rt == 4'h0)
-                    alu_wide = {1'b0, rs_val} + {1'b0, ~{12'h000, imm4}} + 17'd1; // CMPI (subtract)
+                    // CMPI: subtract immediate (for comparison, sets flags)
+                    alu_wide = {1'b0, rs_val} + {1'b0, ~{12'h000, imm4}} + 17'd1;
                 else
-                    alu_wide = {1'b0, rs_val} + {13'b0, imm4}; // ADDI
+                    // ADDI: add immediate
+                    alu_wide = {1'b0, rs_val} + {13'b0, imm4};
                 alu_result = alu_wide[15:0];
                 alu_carry  = alu_wide[16];
             end
-            4'h8: begin // SUB or NEG
-                if (rs == rt)
-                    alu_wide = {1'b0, ~rs_val} + 17'd1; // NEG
+            4'h8: begin // SUB, SBC (rd[3]=1), or NEG (rs==rt)
+                if (rd[3])
+                    // SBC: Rs + ~Rt + Carry (6502-style subtract with borrow)
+                    // When C=1 (no borrow): Rs - Rt
+                    // When C=0 (borrow in): Rs - Rt - 1
+                    alu_wide = {1'b0, rs_val} + {1'b0, ~rt_val} + {16'b0, flag_c};
+                else if (rs == rt)
+                    // NEG: two's complement negate (0 - Rs)
+                    alu_wide = {1'b0, ~rs_val} + 17'd1;
                 else
-                    alu_wide = {1'b0, rs_val} + {1'b0, ~rt_val} + 17'd1; // SUB
+                    // SUB: Rs - Rt using two's complement addition
+                    alu_wide = {1'b0, rs_val} + {1'b0, ~rt_val} + 17'd1;
                 alu_result = alu_wide[15:0];
                 alu_carry  = alu_wide[16];
             end
-            4'h9:    alu_result = rs_val & rt_val;          // AND
-            4'hA:    alu_result = rs_val | rt_val;          // OR
-            4'hB:    alu_result = (rs == rt) ? ~rs_val              // NOT
-                                              : (rs_val ^ rt_val);  // XOR
-            4'hC:    alu_result = rd[3] ? (rs_val << rt_val[3:0]) | (rs_val >> (5'd16 - {1'b0, rt_val[3:0]})) // ROL
-                                        : (rs_val << rt_val[3:0]);  // SHL
-            4'hD:    alu_result = rd[3] ? (rs_val >> rt_val[3:0]) | (rs_val << (5'd16 - {1'b0, rt_val[3:0]})) // ROR
-                                        : (rs_val >> rt_val[3:0]);  // SHR
+            4'h9:    alu_result = rs_val & rt_val;          // AND — bitwise AND
+            4'hA:    alu_result = rs_val | rt_val;          // OR  — bitwise OR
+            4'hB:    alu_result = (rs == rt) ? ~rs_val              // NOT — bitwise complement (when Rs==Rt)
+                                              : (rs_val ^ rt_val);  // XOR — bitwise exclusive OR
+            4'hC:    alu_result = rd[3] ? (rs_val << rt_val[3:0]) | (rs_val >> (5'd16 - {1'b0, rt_val[3:0]})) // ROL — rotate left
+                                        : (rs_val << rt_val[3:0]);  // SHL — shift left (zeros fill)
+            4'hD:    alu_result = rd[3] ? (rs_val >> rt_val[3:0]) | (rs_val << (5'd16 - {1'b0, rt_val[3:0]})) // ROR — rotate right
+                                        : (rs_val >> rt_val[3:0]);  // SHR — shift right (zeros fill)
             default: alu_result = 16'h0000;
         endcase
     end
 
-    // Combinatorial Branch Condition Evaluation
+    // =========================================================================
+    // Branch Condition Evaluator
+    // =========================================================================
+    // Evaluates the branch condition code against the current flags.
+    // Like the ALU, this is combinational — it always produces a result,
+    // but the EXECUTE state only uses it for branch instructions (opcode 0x6).
+    //
+    // Each condition code tests a different flag combination:
+    //   0 = always (unconditional jump)
+    //   1 = zero set (equal)
+    //   2 = zero clear (not equal)
+    //   3 = negative set (result was negative)
+    //   4 = positive (not negative and not zero)
+    //   5 = carry set (unsigned >=, or ADD overflow)
+    //   6 = carry clear (unsigned <, or no ADD overflow)
+
     always @(*) begin
         case (cond)
             4'h0:    take_branch = 1'b1;                // BRA (Unconditional)

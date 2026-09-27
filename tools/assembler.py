@@ -95,7 +95,8 @@ def is_instruction(line):
 RESERVED_MNEMONICS = (
     set(OPCODES.keys()) | set(BRANCH_CONDITIONS.keys()) |
     {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
-     'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET', 'LUI'}
+     'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET', 'LUI',
+     'ADC', 'SBC'}
 )
 
 def count_directive_words(line):
@@ -308,6 +309,30 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
             rd = parse_register(tokens[1])
             rs = parse_register(tokens[2])
             word = (OPCODES['SUB'] << 12) | (rs << 8) | (rs << 4) | rd
+            return f"{word:04X} // {line}"
+
+        # Handle ADC (sub-format of ADD: rd[3]=1, dest R0-R7)
+        elif mnemonic == 'ADC':
+            if len(tokens) < 4:
+                raise ValueError(f"ADC requires 3 registers: '{line}'")
+            rd = parse_register(tokens[1])
+            rs = parse_register(tokens[2])
+            rt = parse_register(tokens[3])
+            if rd > 7:
+                raise ValueError(f"ADC destination limited to R0-R7, got R{rd}")
+            word = (OPCODES['ADD'] << 12) | (rs << 8) | (rt << 4) | (0x8 | rd)
+            return f"{word:04X} // {line}"
+
+        # Handle SBC (sub-format of SUB: rd[3]=1, dest R0-R7)
+        elif mnemonic == 'SBC':
+            if len(tokens) < 4:
+                raise ValueError(f"SBC requires 3 registers: '{line}'")
+            rd = parse_register(tokens[1])
+            rs = parse_register(tokens[2])
+            rt = parse_register(tokens[3])
+            if rd > 7:
+                raise ValueError(f"SBC destination limited to R0-R7, got R{rd}")
+            word = (OPCODES['SUB'] << 12) | (rs << 8) | (rt << 4) | (0x8 | rd)
             return f"{word:04X} // {line}"
 
         # Handle ROL (sub-format of SHL: rd[3]=1, dest R0-R7)
