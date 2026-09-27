@@ -56,6 +56,8 @@ module cpu_core (
     wire [15:0] rs_val = rf[rs];
     wire [15:0] rt_val = rf[rt];
     reg  [15:0] alu_result;
+    reg  [16:0] alu_wide;
+    reg         alu_carry;
     wire [15:0] ext_b      = rf[rt[2:0]]; // Second operand for extended ops (R0-R7)
     wire [31:0] mul_result = rs_val * ext_b;
     wire [15:0] div_quot   = (ext_b != 0) ? rs_val / ext_b : 16'h0000;
@@ -65,6 +67,7 @@ module cpu_core (
     // Status Flags
     reg flag_z;
     reg flag_n;
+    reg flag_c;
 
     // Main FSM
     integer i;
@@ -77,6 +80,7 @@ module cpu_core (
             state          <= S_FETCH;
             flag_z         <= 1'b0;
             flag_n         <= 1'b0;
+            flag_c         <= 1'b0;
             mem_addr       <= 24'h000000;
             mem_write_data <= 16'h0000;
             mem_write_en   <= 1'b0;
@@ -141,6 +145,8 @@ module cpu_core (
                                 rf[rd] <= alu_result;
                             flag_z   <= (alu_result == 16'h0000);
                             flag_n   <= alu_result[15];
+                            if (opcode == 4'h4 || opcode == 4'h8)
+                                flag_c <= alu_carry;
                             pc       <= pc + 1;
                             mem_addr <= pc + 1;
                             state    <= S_FETCH;
@@ -151,6 +157,7 @@ module cpu_core (
                                 rf[rt] <= alu_result;
                             flag_z   <= (alu_result == 16'h0000);
                             flag_n   <= alu_result[15];
+                            flag_c   <= alu_carry;
                             pc       <= pc + 1;
                             mem_addr <= pc + 1;
                             state    <= S_FETCH;
@@ -288,7 +295,7 @@ module cpu_core (
                     next_sp         = rf[15] - 1;
                     rf[15]          <= next_sp;
                     mem_addr        <= {8'h00, next_sp};
-                    mem_write_data  <= {14'b0, flag_n, flag_z};
+                    mem_write_data  <= {13'b0, flag_c, flag_n, flag_z};
                     mem_write_en    <= 1'b1;
                     int_enable      <= 1'b0;
                     pc              <= INT_VECTOR;
@@ -298,6 +305,7 @@ module cpu_core (
                 S_IRET_FLAGS: begin
                     flag_z     <= mem_read_data[0];
                     flag_n     <= mem_read_data[1];
+                    flag_c     <= mem_read_data[2];
                     int_enable <= 1'b1;
                     mem_addr   <= {8'h00, rf[15]};
                     rf[15]     <= rf[15] + 1;
@@ -315,12 +323,29 @@ module cpu_core (
 
     // Combinatorial ALU (selected by opcode, not a shared funct field)
     always @(*) begin
+        alu_carry = 1'b0;
         case (opcode)
-            4'h4:    alu_result = rs_val + rt_val;          // ADD
-            4'h5:    alu_result = (rt == 4'h0) ? rs_val - {12'h000, imm4}  // CMPI
-                                              : rs_val + {12'h000, imm4}; // ADDI
-            4'h8:    alu_result = (rs == rt) ? (~rs_val + 16'd1)   // NEG
-                                              : (rs_val - rt_val);  // SUB
+            4'h4: begin // ADD
+                alu_wide  = {1'b0, rs_val} + {1'b0, rt_val};
+                alu_result = alu_wide[15:0];
+                alu_carry  = alu_wide[16];
+            end
+            4'h5: begin // ADDI or CMPI
+                if (rt == 4'h0)
+                    alu_wide = {1'b0, rs_val} + {1'b0, ~{12'h000, imm4}} + 17'd1; // CMPI (subtract)
+                else
+                    alu_wide = {1'b0, rs_val} + {13'b0, imm4}; // ADDI
+                alu_result = alu_wide[15:0];
+                alu_carry  = alu_wide[16];
+            end
+            4'h8: begin // SUB or NEG
+                if (rs == rt)
+                    alu_wide = {1'b0, ~rs_val} + 17'd1; // NEG
+                else
+                    alu_wide = {1'b0, rs_val} + {1'b0, ~rt_val} + 17'd1; // SUB
+                alu_result = alu_wide[15:0];
+                alu_carry  = alu_wide[16];
+            end
             4'h9:    alu_result = rs_val & rt_val;          // AND
             4'hA:    alu_result = rs_val | rt_val;          // OR
             4'hB:    alu_result = (rs == rt) ? ~rs_val              // NOT
@@ -341,6 +366,8 @@ module cpu_core (
             4'h2:    take_branch = !flag_z;             // BNE (Not Equal / Non-Zero)
             4'h3:    take_branch = flag_n;              // BMI (Minus / Negative)
             4'h4:    take_branch = !flag_n && !flag_z;  // BPL (Positive)
+            4'h5:    take_branch = flag_c;              // BCS (Carry Set / Unsigned >=)
+            4'h6:    take_branch = !flag_c;             // BCC (Carry Clear / Unsigned <)
             default: take_branch = 1'b0;
         endcase
     end

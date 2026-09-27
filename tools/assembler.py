@@ -32,6 +32,8 @@ BRANCH_CONDITIONS = {
     'BNE': 0x2, # Not Equal / Non-Zero
     'BMI': 0x3, # Minus / Negative
     'BPL': 0x4, # Positive
+    'BCS': 0x5, # Carry Set (Unsigned >=)
+    'BCC': 0x6, # Carry Clear (Unsigned <)
 }
 
 def parse_register(reg_str):
