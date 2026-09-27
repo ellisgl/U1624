@@ -89,8 +89,26 @@ def is_instruction(line):
         return False
     return True
 
+RESERVED_MNEMONICS = (
+    set(OPCODES.keys()) | set(BRANCH_CONDITIONS.keys()) |
+    {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD'}
+)
+
+def count_directive_words(line):
+    """Return how many 16-bit words a data directive produces, or 0 if not a directive."""
+    tokens = line.replace(',', ' ').split()
+    if not tokens:
+        return 0
+    directive = tokens[0].upper()
+    if directive == '.WORD':
+        return len(tokens) - 1
+    elif directive == '.BYTE':
+        num_bytes = len(tokens) - 1
+        return (num_bytes + 1) // 2  # pack 2 bytes per word, pad if odd
+    return 0
+
 def pass_one(source_text):
-    """First pass: collect label addresses and build a clean instruction list."""
+    """First pass: collect label addresses and build a clean instruction/directive list."""
     labels = {}
     instructions = []
     addr = 0
@@ -100,22 +118,30 @@ def pass_one(source_text):
         if not clean:
             continue
 
-        # A line can have a label AND an instruction: "loop: ADD R2, R0, R1"
         label = is_label_def(clean)
         if label:
-            if label.upper() in OPCODES or label.upper() in BRANCH_CONDITIONS or label.upper() in ('NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD'):
+            if label.upper() in RESERVED_MNEMONICS:
                 raise ValueError(f"Line {line_num}: Label '{label}' conflicts with a mnemonic name")
             if label in labels:
                 raise ValueError(f"Line {line_num}: Duplicate label '{label}' (first defined at address {labels[label]})")
             labels[label] = addr
-            # Check if there's an instruction after the label on the same line
             rest = clean[len(label)+1:].strip()
             if rest:
-                instructions.append((line_num, rest))
-                addr += 1
+                word_count = count_directive_words(rest)
+                if word_count > 0:
+                    instructions.append((line_num, rest))
+                    addr += word_count
+                else:
+                    instructions.append((line_num, rest))
+                    addr += 1
         else:
-            instructions.append((line_num, clean))
-            addr += 1
+            word_count = count_directive_words(clean)
+            if word_count > 0:
+                instructions.append((line_num, clean))
+                addr += word_count
+            else:
+                instructions.append((line_num, clean))
+                addr += 1
 
     return labels, instructions
 
@@ -130,10 +156,57 @@ def resolve_operand(token, labels, current_addr, context='immediate'):
             return str(labels[stripped])
     return stripped
 
+def parse_value(token, labels):
+    """Parse a numeric literal or label reference into an integer."""
+    token = token.strip()
+    if token in labels:
+        return labels[token]
+    if token.lower().startswith('0x'):
+        return int(token, 16)
+    return int(token, 10)
+
+def assemble_directive(line, line_num, labels):
+    """Assemble a data directive into one or more hex words. Returns a list."""
+    tokens = line.replace(',', ' ').split()
+    directive = tokens[0].upper()
+    values = tokens[1:]
+
+    if directive == '.WORD':
+        words = []
+        for v in values:
+            val = parse_value(v, labels)
+            if not (-32768 <= val <= 65535):
+                raise ValueError(f".word value '{v}' out of 16-bit range")
+            words.append(f"{val & 0xFFFF:04X} // .word {v}")
+        return words
+
+    elif directive == '.BYTE':
+        byte_vals = []
+        for v in values:
+            val = parse_value(v, labels)
+            if not (0 <= val <= 255):
+                raise ValueError(f".byte value '{v}' out of 8-bit range (0-255)")
+            byte_vals.append(val)
+        if len(byte_vals) % 2 != 0:
+            byte_vals.append(0)  # pad to even
+        words = []
+        for i in range(0, len(byte_vals), 2):
+            word = (byte_vals[i] << 8) | byte_vals[i+1]
+            words.append(f"{word:04X} // .byte {values[i]}" +
+                         (f", {values[i+1]}" if i+1 < len(values) else ", 0x00 (pad)"))
+        return words
+
+    return None
+
 def assemble_line(line, line_num, labels=None, current_addr=0):
     """Parses a single line of text assembly into a 16-bit hex word."""
     if not line:
         return None
+
+    # Check for data directives first (before punctuation stripping)
+    first_token = line.split()[0].upper() if line.split() else ''
+    if first_token in ('.WORD', '.BYTE'):
+        return assemble_directive(line, line_num, labels or {})
 
     # Replace punctuation characters with spaces for straightforward tokenization
     clean_line = line.replace(',', ' ').replace('[', ' ').replace(']', ' ').replace('+', ' ')
@@ -285,10 +358,17 @@ def assemble_program(source_text):
 
     # Pass 2: assemble each instruction with label resolution
     binary_lines = []
-    for addr, (line_num, line_text) in enumerate(instructions):
+    addr = 0
+    for line_num, line_text in instructions:
         assembled = assemble_line(line_text, line_num, labels, addr)
-        if assembled:
+        if assembled is None:
+            continue
+        if isinstance(assembled, list):
+            binary_lines.extend(assembled)
+            addr += len(assembled)
+        else:
             binary_lines.append(assembled)
+            addr += 1
     return binary_lines
 
 def save_to_hex_file(hex_lines, filename="program.hex"):
@@ -304,34 +384,34 @@ def save_to_hex_file(hex_lines, filename="program.hex"):
 
 if __name__ == "__main__":
     assembly_code = """
-    ; --- Test MUL, MULH, DIV, MOD ---
-    LIMM  R6, 0x1E        ; R6 = 30 (data area base)
+    ; --- Test data directives: .word lookup table and .byte string ---
 
-    ; Test 1: MUL/MULH — 256 * 256 = 65536 (0x00010000)
-    LIMM  R0, 1
-    LIMM  R7, 8
-    SHL   R0, R0, R7      ; R0 = 0x0100 (256)
-    MUL   R2, R0, R0      ; R2 = low 16 = 0x0000
-    MULH  R3, R0, R0      ; R3 = high 16 = 0x0001
-    STORE R2, [R6 + 0]    ; sram[30] = 0x0000
-    STORE R3, [R6 + 1]    ; sram[31] = 0x0001
+    ; Load table base address via label
+    LIMM  R0, table        ; R0 = address of lookup table
+    LOAD  R1, [R0 + 0]     ; R1 = table[0] = 0x1234
+    LOAD  R2, [R0 + 1]     ; R2 = table[1] = 0xABCD
+    LOAD  R3, [R0 + 2]     ; R3 = table[2] = 42
 
-    ; Test 2: DIV/MOD — 63 / 10 = 6 remainder 3
-    LIMM  R0, 63          ; R0 = 63
-    LIMM  R1, 10          ; R1 = 10
-    DIV   R2, R0, R1      ; R2 = 63 / 10 = 6
-    MOD   R3, R0, R1      ; R3 = 63 % 10 = 3
-    STORE R2, [R6 + 2]    ; sram[32] = 0x0006
-    STORE R3, [R6 + 3]    ; sram[33] = 0x0003
+    ; Store results to data area for validation
+    LIMM  R6, 0x1E         ; R6 = 30 (data area)
+    STORE R1, [R6 + 0]     ; sram[30] = 0x1234
+    STORE R2, [R6 + 1]     ; sram[31] = 0xABCD
+    STORE R3, [R6 + 2]     ; sram[32] = 0x002A (42)
 
-    ; Test 3: Divide by zero protection — should produce 0
-    LIMM  R1, 0           ; R1 = 0
-    DIV   R4, R0, R1      ; R4 = 63 / 0 = 0 (protected)
-    MOD   R5, R0, R1      ; R5 = 63 % 0 = 0 (protected)
-    STORE R4, [R6 + 4]    ; sram[34] = 0x0000
-    STORE R5, [R6 + 5]    ; sram[35] = 0x0000
+    ; Load string bytes (packed 2 per word)
+    LIMM  R0, greeting     ; R0 = address of greeting
+    LOAD  R4, [R0 + 0]     ; R4 = 0x4869 ('H','i')
+
+    STORE R4, [R6 + 3]     ; sram[33] = 0x4869
 
     HALT
+
+    ; --- Data Section ---
+table:
+    .word 0x1234, 0xABCD, 42
+
+greeting:
+    .byte 0x48, 0x69       ; 'H', 'i'
     """
 
     print("--- U1624 Toolchain Assembly ---")

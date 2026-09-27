@@ -85,18 +85,15 @@ module tb_cpu_core;
                 $display("[UART OUTPUT] %0d character(s) transmitted.", uart_len);
             end
 
-            if (sram[30] == 16'h0000 && sram[31] == 16'h0001 &&
-                sram[32] == 16'h0006 && sram[33] == 16'h0003 &&
-                sram[34] == 16'h0000 && sram[35] == 16'h0000) begin
-                $display("[SIMULATION PASSED] Extended ALU verified:");
-                $display("  MUL/MULH 256*256: low=0x%h high=0x%h", sram[30], sram[31]);
-                $display("  DIV/MOD  63/10:   quot=0x%h rem=0x%h", sram[32], sram[33]);
-                $display("  DIV/MOD  63/0:    quot=0x%h rem=0x%h (div-by-zero)\n", sram[34], sram[35]);
+            if (sram[30] == 16'h1234 && sram[31] == 16'hABCD &&
+                sram[32] == 16'h002A && sram[33] == 16'h4869) begin
+                $display("[SIMULATION PASSED] Data directives verified:");
+                $display("  .word table[0]=0x%h table[1]=0x%h table[2]=0x%h", sram[30], sram[31], sram[32]);
+                $display("  .byte greeting=0x%h ('Hi')\n", sram[33]);
             end else begin
-                $display("[SIMULATION FAILED] Extended ALU mismatch:");
-                $display("  sram[30]=0x%h (exp 0000) sram[31]=0x%h (exp 0001)", sram[30], sram[31]);
-                $display("  sram[32]=0x%h (exp 0006) sram[33]=0x%h (exp 0003)", sram[32], sram[33]);
-                $display("  sram[34]=0x%h (exp 0000) sram[35]=0x%h (exp 0000)\n", sram[34], sram[35]);
+                $display("[SIMULATION FAILED] Data directive mismatch:");
+                $display("  sram[30]=0x%h (exp 1234) sram[31]=0x%h (exp ABCD)", sram[30], sram[31]);
+                $display("  sram[32]=0x%h (exp 002A) sram[33]=0x%h (exp 4869)\n", sram[32], sram[33]);
             end
             $finish;
         end
