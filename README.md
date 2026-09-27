@@ -167,12 +167,14 @@ This assembles the source, compiles the RTL with Icarus Verilog, and launches th
 |---------------|-------------|
 | `0x000000`–`0x00FFEF` | RAM / Program memory |
 | `0x00FFF0` | UART TX Data (write) |
-| `0x00FFF1` | UART Status (read, bit 0 = TX ready) |
+| `0x00FFF1` | UART Status (read, bit 0 = TX ready, bit 1 = RX data available) |
 | `0x00FFF2` | Timer reload value (R/W — also sets count) |
 | `0x00FFF3` | Timer current count (R) |
 | `0x00FFF4` | Timer control (R/W, bit 0: enable, bit 1: auto-reload) |
 | `0x00FFF5` | Timer status (R: bit 0 = fired; W: acknowledge/clear) |
-| `0x00FFF6`–`0x00FFFF` | Reserved I/O |
+| `0x00FFF6` | UART RX Data (R: current byte; W: acknowledge/pop) |
+| `0x00FFF7` | UART RX Control (R/W, bit 0: RX interrupt enable) |
+| `0x00FFF8`–`0x00FFFF` | Reserved I/O |
 
 ## Design Influences
 

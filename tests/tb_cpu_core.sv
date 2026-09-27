@@ -22,8 +22,18 @@ module tb_cpu_core;
     wire [1:0]  timer_reg_addr = mem_addr[3:0] - 4'h2;
     wire        timer_write_en = mem_write_en && timer_select;
 
+    // ---------------------------------------------------------
+    // UART RX FIFO
+    // ---------------------------------------------------------
+    reg [7:0]  rx_fifo [0:15];
+    integer    rx_head, rx_tail, rx_count;
+    reg        rx_data_available;
+    reg [7:0]  rx_data_reg;
+    reg        rx_int_enable;
+    wire       uart_rx_irq = rx_data_available & rx_int_enable;
+
     // Interrupt: OR of all interrupt sources
-    wire irq = timer_irq;
+    wire irq = timer_irq | uart_rx_irq;
 
     // Instantiate the CPU Core Module
     cpu_core uut (
@@ -55,8 +65,6 @@ module tb_cpu_core;
     // ---------------------------------------------------------
     // Mock I/O Registers
     // ---------------------------------------------------------
-    // 0xFF0000 = UART TX Data (write-only)
-    // 0xFF0001 = UART Status  (read-only, bit 0 = TX ready)
     reg [15:0] io_read_data;
 
     always @(*) begin
@@ -64,7 +72,9 @@ module tb_cpu_core;
             io_read_data = timer_read_data;
         else begin
             case (mem_addr[3:0])
-                4'h1:    io_read_data = 16'h0001; // UART status: always ready
+                4'h1:    io_read_data = {14'b0, rx_data_available, 1'b1}; // Status: bit 0=TX ready, bit 1=RX available
+                4'h6:    io_read_data = {8'h00, rx_data_reg};             // UART RX data
+                4'h7:    io_read_data = {15'b0, rx_int_enable};           // UART RX control
                 default: io_read_data = 16'h0000;
             endcase
         end
@@ -89,6 +99,20 @@ module tb_cpu_core;
                     end
                     4'h2, 4'h3, 4'h4, 4'h5: begin
                         // Timer registers — handled by timer module
+                    end
+                    4'h6: begin // UART RX acknowledge (pop FIFO)
+                        if (rx_count > 0) begin
+                            rx_head = (rx_head + 1) & 4'hF;
+                            rx_count = rx_count - 1;
+                            if (rx_count > 0) begin
+                                rx_data_reg = rx_fifo[rx_head];
+                            end else begin
+                                rx_data_available = 0;
+                            end
+                        end
+                    end
+                    4'h7: begin // UART RX control
+                        rx_int_enable = mem_write_data[0];
                     end
                     default: begin
                         $display("[IO WRITE] Unknown register 0x%h | Data: 0x%h", mem_addr, mem_write_data);
@@ -115,7 +139,11 @@ module tb_cpu_core;
             $display("[RESULTS] sram[30]=0x%h  sram[31]=0x%h  sram[32]=0x%h  sram[33]=0x%h  sram[34]=0x%h",
                      sram[30], sram[31], sram[32], sram[33], sram[34]);
 
-            if (sram[30] == 16'h0055 && sram[31] == 16'h0042 &&
+            if (sram[30] == 16'h0048 && sram[31] == 16'h0069) begin
+                $display("[SIMULATION PASSED] UART RX test verified:");
+                $display("  Char 1=0x%h ('%c')  Char 2=0x%h ('%c')\n",
+                         sram[30], sram[30][7:0], sram[31], sram[31][7:0]);
+            end else if (sram[30] == 16'h0055 && sram[31] == 16'h0042 &&
                 sram[32] == 16'h0001) begin
                 $display("[SIMULATION PASSED] Interrupt test verified:");
                 $display("  Main continued=0x%h  Handler ran=0x%h  Flags preserved=0x%h\n",
@@ -154,6 +182,16 @@ module tb_cpu_core;
         end
 
         uart_len = 0;
+
+        // Initialize UART RX FIFO with test data
+        rx_fifo[0] = 8'h48; // 'H'
+        rx_fifo[1] = 8'h69; // 'i'
+        rx_head = 0;
+        rx_tail = 2;
+        rx_count = 2;
+        rx_data_available = 1;
+        rx_data_reg = rx_fifo[0];
+        rx_int_enable = 0;
 
         // Stream raw machine code dynamically from your tools directory
         $readmemh("./program.hex", sram);
