@@ -362,13 +362,20 @@ module cpu_core (
                             state <= S_FETCH;
                         end
 
-                        // ----- CALL, RET, IRET, SEI, CLI -----
+                        // ----- CALL, RET, IRET, SEI, CLI, GETF, SETF -----
                         // Multiple instructions packed under opcode 0x7,
-                        // distinguished by the lower 12 bits.
+                        // distinguished by the lower 12 or 8 bits.
                         //
                         // This encoding trick saves opcode space — with only
                         // 4 bits for the opcode (16 possible values), we need
                         // to be creative about fitting all instructions.
+                        //
+                        // Fixed encodings (rs=0, full 12-bit match):
+                        //   0x7000 = RET, 0x7001 = IRET,
+                        //   0x7002 = SEI, 0x7003 = CLI
+                        // Register encodings (rs selects register, low 8 bits match):
+                        //   0x7R04 = GETF Rs, 0x7R05 = SETF Rs
+                        // Anything else = CALL Rs
                         4'h7: begin
                             if (instr[11:0] == 12'h000) begin
                                 // RET — return from subroutine
@@ -391,6 +398,30 @@ module cpu_core (
                             end else if (instr[11:0] == 12'h003) begin
                                 // CLI — Clear (disable) Interrupts
                                 int_enable <= 1'b0;
+                                pc         <= pc + 1;
+                                mem_addr   <= pc + 1;
+                                state      <= S_FETCH;
+                            end else if (imm8 == 8'h04) begin
+                                // GETF Rs — read status register into Rs
+                                // Packs all CPU flags into a single 16-bit value.
+                                // Bit layout: {12'b0, I, C, N, Z}
+                                //   Bit 0: Z (zero flag)
+                                //   Bit 1: N (negative flag)
+                                //   Bit 2: C (carry flag)
+                                //   Bit 3: I (interrupt enable)
+                                rf[rs] <= {12'b0, int_enable, flag_c, flag_n, flag_z};
+                                pc         <= pc + 1;
+                                mem_addr   <= pc + 1;
+                                state      <= S_FETCH;
+                            end else if (imm8 == 8'h05) begin
+                                // SETF Rs — write status register from Rs
+                                // Restores flags from a register value, using the
+                                // same bit layout as GETF. Useful for saving and
+                                // restoring CPU state across context switches.
+                                flag_z     <= rs_val[0];
+                                flag_n     <= rs_val[1];
+                                flag_c     <= rs_val[2];
+                                int_enable <= rs_val[3];
                                 pc         <= pc + 1;
                                 mem_addr   <= pc + 1;
                                 state      <= S_FETCH;

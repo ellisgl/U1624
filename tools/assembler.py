@@ -96,7 +96,7 @@ RESERVED_MNEMONICS = (
     set(OPCODES.keys()) | set(BRANCH_CONDITIONS.keys()) |
     {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
      'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET', 'LUI',
-     'ADC', 'SBC'}
+     'ADC', 'SBC', 'GETF', 'SETF'}
 )
 
 def count_directive_words(line):
@@ -418,6 +418,22 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
         elif mnemonic == 'CLI':
             word = 0x7003
             return f"{word:04X} // CLI"
+
+        # Handle GETF (read status register: opcode 0x7, imm8=0x04)
+        elif mnemonic == 'GETF':
+            if len(tokens) < 2:
+                raise ValueError(f"GETF requires a destination register: '{line}'")
+            rd = parse_register(tokens[1])
+            word = (OPCODES['CALL'] << 12) | (rd << 8) | 0x04
+            return f"{word:04X} // {line}"
+
+        # Handle SETF (write status register: opcode 0x7, imm8=0x05)
+        elif mnemonic == 'SETF':
+            if len(tokens) < 2:
+                raise ValueError(f"SETF requires a source register: '{line}'")
+            rs = parse_register(tokens[1])
+            word = (OPCODES['CALL'] << 12) | (rs << 8) | 0x05
+            return f"{word:04X} // {line}"
 
         elif mnemonic == 'NOP':
             word = 0x6001

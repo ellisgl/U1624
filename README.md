@@ -23,7 +23,7 @@ J-Type:  [Opcode (4)][Rs (4)][Imm8 (8)]
 B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 ```
 
-### Instructions (35 total)
+### Instructions (37 total)
 
 | Category | Mnemonic | Description | Encoding |
 |----------|----------|-------------|----------|
@@ -62,6 +62,8 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | **Interrupts** | `SEI` | Set interrupt enable | `0x7002` |
 | | `CLI` | Clear interrupt enable | `0x7003` |
 | | `IRET` | Return from interrupt (restore flags + PC) | `0x7001` |
+| **Status** | `GETF Rd` | Read status register into Rd | `0x7R04` |
+| | `SETF Rs` | Write status register from Rs | `0x7R05` |
 | **Directives** | `.word val, ...` | Embed 16-bit constants | |
 | | `.byte val, ...` | Embed 8-bit values (packed 2/word) | |
 
@@ -73,6 +75,15 @@ ALU and compare instructions set three flags:
 - **C** (Carry) — set by ADD/ADC/SUB/SBC/ADDI/CMPI (6502 convention: C=1 on ADD overflow, C=1 on SUB when no borrow)
 
 ADC and SBC use the carry flag as input for multi-word arithmetic chains. Data transfer instructions (LOAD, STORE, PUSH, POP, LIMM, LUI) do not modify flags.
+
+The status register can be read/written as a single value with `GETF`/`SETF`:
+
+| Bit | Flag | Description |
+|-----|------|-------------|
+| 0 | Z | Zero |
+| 1 | N | Negative |
+| 2 | C | Carry |
+| 3 | I | Interrupt enable |
 
 ### Interrupts
 
@@ -129,7 +140,8 @@ U1624/
 │   ├── test_lui.asm         # LUI instruction test
 │   ├── test_uart_rx.asm     # UART receive test
 │   ├── test_carry.asm       # Carry flag and BCS/BCC test
-│   └── test_adc_sbc.asm     # ADC/SBC multi-word arithmetic test
+│   ├── test_adc_sbc.asm     # ADC/SBC multi-word arithmetic test
+│   └── test_status_reg.asm  # GETF/SETF status register test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script
