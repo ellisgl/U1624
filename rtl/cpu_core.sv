@@ -41,7 +41,13 @@ module cpu_core (
     // Interrupt Interface — external signal to request CPU attention
     // When irq is high and interrupts are enabled, the CPU will pause the current
     // program and jump to the interrupt handler at address 0x0008.
-    input  wire        irq
+    input  wire        irq,
+
+    // Bus Hold — when asserted, the CPU freezes in its current state.
+    // Used by the DMA controller to take over the memory bus for block
+    // transfers without the CPU interfering. All registers and outputs
+    // hold their values until hold is deasserted.
+    input  wire        hold
 );
 
     // =========================================================================
@@ -210,7 +216,7 @@ module cpu_core (
             // Clear all 16 registers to zero
             for (i = 0; i < 16; i = i + 1)
                 rf[i] <= 16'h0000;
-        end else begin
+        end else if (!hold) begin
             case (state)
                 // =============================================================
                 // FETCH — Read the next instruction from memory

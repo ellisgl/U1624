@@ -10,7 +10,8 @@ A custom 16-bit softcore CPU targeting FPGA, inspired by the **65C816**, **Z8000
 - **Multi-state FSM** execution: FETCH → EXECUTE → MEM_READ/MEM_WRITE → FETCH
 - **Hardware multiply** (16×16→32) and **divide** with divide-by-zero protection
 - **Single-level interrupts** with fixed vector, automatic PC/flag save-restore
-- **Memory-mapped I/O** at `0xFFF0`–`0xFFFF` with UART and timer peripherals
+- **Memory-mapped I/O** at `0xFFF0`–`0xFFFF` with UART, timer, and DMA peripherals
+- **DMA controller** for CPU-free memory-to-memory block transfers (2 cycles/word)
 
 ## Instruction Set
 
@@ -120,6 +121,26 @@ start:
     ; main program...
 ```
 
+### DMA Controller
+
+The DMA controller performs memory-to-memory block transfers without CPU intervention. The CPU programs the source, destination, and length, then starts the transfer. The DMA takes over the memory bus (freezing the CPU via the `hold` signal) and copies at 2 cycles per word. When done, the CPU resumes.
+
+```asm
+    ; Copy 10 words from address 0x100 to address 0x200
+    LIMM  R3, 0xF8
+    LUI   R3, 0xFF           ; R3 = 0xFFF8 (DMA base)
+    LIMM  R0, 0x00
+    LUI   R0, 0x01           ; R0 = 0x0100
+    STORE R0, [R3 + 0]       ; DMA src = 0x0100
+    LIMM  R0, 0x00
+    LUI   R0, 0x02           ; R0 = 0x0200
+    STORE R0, [R3 + 1]       ; DMA dst = 0x0200
+    LIMM  R0, 10
+    STORE R0, [R3 + 2]       ; DMA len = 10
+    LIMM  R0, 0x01
+    STORE R0, [R3 + 3]       ; Start! CPU freezes, resumes when done.
+```
+
 ### Building 16-bit Addresses
 
 `LIMM` loads an 8-bit value (zeroing the upper byte). To construct a full 16-bit address, pair it with `LUI`:
@@ -165,7 +186,8 @@ my_func:
 U1624/
 ├── rtl/
 │   ├── cpu_core.sv          # CPU core RTL (SystemVerilog)
-│   └── timer.sv             # Countdown timer peripheral
+│   ├── timer.sv             # Countdown timer peripheral
+│   └── dma_controller.sv   # DMA controller for block transfers
 ├── tests/
 │   ├── tb_cpu_core.sv       # Testbench with mock SRAM, UART, and timer
 │   ├── test_program.asm     # PDP-16 instruction tests
@@ -176,7 +198,8 @@ U1624/
 │   ├── test_adc_sbc.asm     # ADC/SBC multi-word arithmetic test
 │   ├── test_status_reg.asm  # GETF/SETF status register test
 │   ├── test_signed_branch.asm # BGE/BLT signed comparison test
-│   └── test_stack_frame.asm # ENTER/LEAVE stack frame test
+│   ├── test_stack_frame.asm # ENTER/LEAVE stack frame test
+│   └── test_dma.asm         # DMA block transfer test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script
@@ -243,7 +266,11 @@ bash run_sim.sh my_program.asm         # run a custom program
 | `0x00FFF5` | Timer status (R/W) — bit 0: fired; write to acknowledge |
 | `0x00FFF6` | UART RX Data (R: current byte; W: acknowledge/pop) |
 | `0x00FFF7` | UART RX Control (R/W) — bit 0: RX interrupt enable |
-| `0x00FFF8`–`0x00FFFF` | Reserved I/O |
+| `0x00FFF8` | DMA Source Address (R/W) |
+| `0x00FFF9` | DMA Destination Address (R/W) |
+| `0x00FFFA` | DMA Transfer Length in words (R/W) |
+| `0x00FFFB` | DMA Control/Status (R/W) — bit 0: start/busy, bit 1: int enable, bit 2: done |
+| `0x00FFFC`–`0x00FFFF` | Reserved I/O |
 
 ### Interrupt Sources
 
@@ -253,6 +280,7 @@ The CPU's `irq` line is the OR of all peripheral interrupt outputs:
 |--------|---------|-------------|
 | Timer | Count reaches zero | Write to `0xFFF5` |
 | UART RX | Data available (when enabled via `0xFFF7` bit 0) | Write to `0xFFF6` |
+| DMA | Transfer complete (when enabled via `0xFFFB` bit 1) | Start new transfer or clear int enable |
 
 ## Architecture Diagrams
 
@@ -305,6 +333,8 @@ graph TB
     FSM -->|"state ctrl"| MEM
     PC -->|"addr"| MEM
 
+    HOLD_IN(["hold"]) -.-> FSM
+
     IRQ_IN(["irq"]) --> INT
 ```
 
@@ -345,20 +375,30 @@ graph LR
         SRAM["SRAM\n0x0000–0xFFEF\nProgram + Data"]
         UART["UART\nTX: 0xFFF0\nRX: 0xFFF6–7\nStatus: 0xFFF1"]
         TIMER["Timer\n0xFFF2–0xFFF5\nCountdown\nAuto-reload\ntimer.sv"]
+        DMA["DMA Controller\n0xFFF8–0xFFFB\nBlock Transfer\ndma_controller.sv"]
     end
 
     CPU["CPU Core\ncpu_core.sv\n16 GPRs · 24-bit PC\nALU · MUL/DIV\n8-state FSM"] <-->|"addr/data"| bus
 
+    subgraph arb["Bus Arbitration"]
+        MUX{"bus mux\nCPU ↔ DMA"}
+    end
+
+    DMA -->|"bus_req"| MUX
+    MUX -->|"hold"| CPU
+
     subgraph irq_block["IRQ Routing"]
-        IRQ_OR{"irq = timer_irq | uart_rx_irq"}
+        IRQ_OR{"irq = timer | uart_rx | dma"}
     end
 
     TIMER -->|"timer_irq"| IRQ_OR
     UART -->|"uart_rx_irq"| IRQ_OR
+    DMA -->|"dma_irq"| IRQ_OR
     IRQ_OR -->|"irq (active-high, level)"| CPU
 
     CLK(["clk"]) -.-> CPU
     CLK -.-> TIMER
+    CLK -.-> DMA
 ```
 
 ## Design Influences

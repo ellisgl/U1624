@@ -6,11 +6,34 @@ module tb_cpu_core;
     reg clk;
     reg rst_n;
 
-    // Interconnect wires between UUT and Mock Memory
-    wire [23:0] mem_addr;
+    // ---------------------------------------------------------
+    // CPU Bus Signals (directly from cpu_core outputs)
+    // ---------------------------------------------------------
+    wire [23:0] cpu_mem_addr;
+    wire [15:0] cpu_mem_write_data;
+    wire        cpu_mem_write_en;
+
+    // ---------------------------------------------------------
+    // DMA Bus Signals (from dma_controller outputs)
+    // ---------------------------------------------------------
+    wire [23:0] dma_bus_addr;
+    wire [15:0] dma_bus_write_data;
+    wire        dma_bus_write_en;
+    wire        dma_bus_req;
+    wire        dma_irq;
+    wire [15:0] dma_read_data;
+
+    // ---------------------------------------------------------
+    // Bus Arbitration — DMA takes priority when it needs the bus
+    // ---------------------------------------------------------
+    // When bus_req is asserted, the memory bus switches from CPU
+    // to DMA, and the CPU is frozen via its hold input.
+    wire dma_active = dma_bus_req;
+
+    wire [23:0] mem_addr       = dma_active ? dma_bus_addr       : cpu_mem_addr;
+    wire [15:0] mem_write_data = dma_active ? dma_bus_write_data : cpu_mem_write_data;
+    wire        mem_write_en   = dma_active ? dma_bus_write_en   : cpu_mem_write_en;
     wire [15:0] mem_read_data;
-    wire [15:0] mem_write_data;
-    wire        mem_write_en;
 
     // Address Decode: I/O space 0x00FFF0 - 0x00FFFF
     wire is_io = (mem_addr[15:4] == 12'hFFF);
@@ -21,6 +44,11 @@ module tb_cpu_core;
     wire        timer_select = is_io && (mem_addr[3:0] >= 4'h2 && mem_addr[3:0] <= 4'h5);
     wire [1:0]  timer_reg_addr = mem_addr[3:0] - 4'h2;
     wire        timer_write_en = mem_write_en && timer_select;
+
+    // DMA peripheral — mapped at 0xFFF8–0xFFFB
+    wire        dma_select = is_io && (mem_addr[3:0] >= 4'h8 && mem_addr[3:0] <= 4'hB);
+    wire [1:0]  dma_reg_addr = mem_addr[1:0];
+    wire        dma_write_en = mem_write_en && dma_select;
 
     // ---------------------------------------------------------
     // UART RX FIFO
@@ -33,17 +61,18 @@ module tb_cpu_core;
     wire       uart_rx_irq = rx_data_available & rx_int_enable;
 
     // Interrupt: OR of all interrupt sources
-    wire irq = timer_irq | uart_rx_irq;
+    wire irq = timer_irq | uart_rx_irq | dma_irq;
 
     // Instantiate the CPU Core Module
     cpu_core uut (
         .clk(clk),
         .rst_n(rst_n),
-        .mem_addr(mem_addr),
+        .mem_addr(cpu_mem_addr),
         .mem_read_data(mem_read_data),
-        .mem_write_data(mem_write_data),
-        .mem_write_en(mem_write_en),
-        .irq(irq)
+        .mem_write_data(cpu_mem_write_data),
+        .mem_write_en(cpu_mem_write_en),
+        .irq(irq),
+        .hold(dma_active)
     );
 
     // Instantiate Timer Peripheral
@@ -55,6 +84,23 @@ module tb_cpu_core;
         .write_en(timer_write_en),
         .read_data(timer_read_data),
         .irq(timer_irq)
+    );
+
+    // Instantiate DMA Controller
+    dma_controller dma0 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .reg_addr(dma_reg_addr),
+        .write_data(mem_write_data),
+        .write_en(dma_write_en),
+        .read_data(dma_read_data),
+        .bus_addr(dma_bus_addr),
+        .bus_read_data(mem_read_data),
+        .bus_write_data(dma_bus_write_data),
+        .bus_write_en(dma_bus_write_en),
+        .bus_req(dma_bus_req),
+        .bus_grant(dma_bus_req),
+        .irq(dma_irq)
     );
 
     // ---------------------------------------------------------
@@ -70,6 +116,8 @@ module tb_cpu_core;
     always @(*) begin
         if (timer_select)
             io_read_data = timer_read_data;
+        else if (dma_select)
+            io_read_data = dma_read_data;
         else begin
             case (mem_addr[3:0])
                 4'h1:    io_read_data = {14'b0, rx_data_available, 1'b1}; // Status: bit 0=TX ready, bit 1=RX available
@@ -113,6 +161,9 @@ module tb_cpu_core;
                     end
                     4'h7: begin // UART RX control
                         rx_int_enable = mem_write_data[0];
+                    end
+                    4'h8, 4'h9, 4'hA, 4'hB: begin
+                        // DMA registers — handled by DMA controller
                     end
                     default: begin
                         $display("[IO WRITE] Unknown register 0x%h | Data: 0x%h", mem_addr, mem_write_data);
