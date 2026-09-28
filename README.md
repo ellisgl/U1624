@@ -14,6 +14,7 @@ A custom 16-bit softcore CPU targeting FPGA, inspired by the **65C816**, **Z8000
 - **Single-level interrupts** with three vectors (TRAP, IRQ, FAULT), automatic PC/flag/mode save-restore
 - **Memory-mapped I/O** at `0xFFF0`–`0xFFFF` with UART, timer, DMA, and MPU peripherals
 - **DMA controller** for CPU-free memory-to-memory block transfers (2 cycles/word)
+- **DDR3 memory path** — word→line→CDC→DDR3 pipeline with clock domain crossing for off-chip DRAM
 - **Bus ready / wait states** — active-high `bus_ready` input allows slow memory or I/O to stall the CPU
 
 ## Instruction Set
@@ -118,7 +119,7 @@ The CPU supports three exception types, each with a fixed vector address. All en
 |---------|--------|
 | Enable/disable | `SEI` / `CLI` instructions (affects IRQ only) |
 | On entry | Save mode, enter supervisor, push PC + flags, disable ints, jump to vector |
-| On `IRET` | Pop flags + PC, restore privilege mode, re-enable interrupts |
+| On `IRET` | Pop flags + PC, restore privilege mode and saved interrupt enable state |
 | IRQ check | At `S_FETCH` — between instructions, never mid-instruction |
 | Fault check | At `S_FETCH`, `S_MEM_READ`, `S_MEM_WRITE` — data faults save PC−1 for retry |
 | Nesting | Not supported (interrupts disabled during handler) |
@@ -184,6 +185,34 @@ The `bus_ready` input allows slow memory or I/O devices to insert wait states. W
 | `S_MEM_WRITE` | Holds — `mem_write_en` stays asserted |
 
 Tie `bus_ready` high for zero-wait-state memory. In the testbench, SRAM addresses >= 50 simulate a slow device with 1 wait state per access.
+
+### DDR3 Memory Path
+
+The DDR3 memory path connects the CPU to off-chip DDR3 SDRAM through a four-stage pipeline. Each stage handles one level of abstraction, from 16-bit CPU words down to 256-bit DDR3 beats.
+
+```
+CPU (16-bit words)
+  │
+  ▼
+word_line_adapter       — packs a 16-bit word R/W into a 128-bit cache line
+  │                       (8 words/line, byte-enable mask for writes)
+  ▼
+memory_cdc_bridge       — toggle-based clock domain crossing
+  │                       (CPU clock → memory clock, 2-flop synchronizers)
+  ▼
+ddr3_ui_adapter         — maps 128-bit lines to 256-bit DDR3 beats
+  │                       (2 lines/beat, byte mask protects untouched half)
+  ▼
+DDR3 Controller (Gowin IP)
+```
+
+**Address split:** The lower 64K words (`0x0000`–`0xFFFF`) are served by fast on-chip SRAM. Addresses above `0xFFFF` route through the DDR3 path. The CPU currently forms LOAD/STORE addresses as `{8'h00, Rs} + imm4`, so accessing DDR3 from software will require a bank register extension (future work).
+
+**Clock domains:** The CPU runs at its own clock (e.g. 50 MHz). The DDR3 controller runs on a separate memory clock (e.g. 100 MHz). The CDC bridge uses toggle-based handshaking with `(* async_reg *)` two-flop synchronizers — one outstanding transaction at a time.
+
+**Stall integration:** When a DDR3 access is in progress, `bus_ready` is deasserted, stalling the CPU until the response arrives. A configurable timeout counter (default 4096 CPU cycles) raises a fault if the DDR3 path fails to respond.
+
+**Write semantics:** Writes are not cached. Each word write issues a full read-modify-write at the DDR3 beat level — the byte mask ensures only the target word's two bytes are updated within the 256-bit beat.
 
 ### Supervisor / User Mode
 
@@ -294,9 +323,14 @@ U1624/
 │   ├── cpu_core.sv          # CPU core RTL (SystemVerilog)
 │   ├── mpu.sv               # Memory Protection Unit (4 regions)
 │   ├── timer.sv             # Countdown timer peripheral
-│   └── dma_controller.sv   # DMA controller for block transfers
+│   ├── dma_controller.sv   # DMA controller for block transfers
+│   ├── word_line_adapter.sv    # 16-bit word ↔ 128-bit cache line adapter
+│   ├── memory_cdc_bridge.sv    # Toggle-based clock domain crossing bridge
+│   ├── ddr3_ui_adapter.sv      # 128-bit line ↔ 256-bit DDR3 beat adapter
+│   └── ddr3_memory_path.sv     # Top-level DDR3 compositor (all layers)
 ├── tests/
-│   ├── tb_cpu_core.sv       # Testbench with mock SRAM, UART, and timer
+│   ├── tb_cpu_core.sv       # Testbench with mock SRAM, UART, timer, and DDR3
+│   ├── mock_ddr3_controller.sv  # DDR3 controller simulation model
 │   ├── test_program.asm     # PDP-16 instruction tests
 │   ├── test_interrupts.asm  # Timer-driven interrupt test
 │   ├── test_lui.asm         # LUI instruction test
@@ -312,7 +346,8 @@ U1624/
 │   ├── test_bit_ops.asm     # BTST/BSET/BCLR/BTGL bit operation test
 │   ├── test_swap.asm        # SWAP register exchange test
 │   ├── test_string_ops.asm  # MOVSW/LODSW/STOSW block move test
-│   └── test_mpu.asm         # MPU / supervisor mode / TRAP test
+│   ├── test_mpu.asm         # MPU / supervisor mode / TRAP test
+│   └── test_ddr3.asm        # DDR3 memory path read/write test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script
@@ -518,6 +553,18 @@ graph LR
     DMA -->|"bus_req"| MUX
     MUX -->|"hold"| CPU
 
+    subgraph ddr3_path["DDR3 Memory Path"]
+        direction TB
+        WLA["Word/Line Adapter\nword_line_adapter.sv"]
+        CDC["CDC Bridge\nmemory_cdc_bridge.sv"]
+        DUI["DDR3 UI Adapter\nddr3_ui_adapter.sv"]
+        DDR3["DDR3 SDRAM\n(Gowin IP)"]
+        WLA --> CDC --> DUI --> DDR3
+    end
+
+    CPU <-->|"addr ≥ 0x10000"| WLA
+    DUI -.->|"bus_ready"| CPU
+
     subgraph irq_block["IRQ Routing"]
         IRQ_OR{"irq = timer | uart_rx | dma"}
     end
@@ -530,6 +577,9 @@ graph LR
     CLK(["clk"]) -.-> CPU
     CLK -.-> TIMER
     CLK -.-> DMA
+    MCLK(["mem_clk"]) -.-> CDC
+    MCLK -.-> DUI
+    MCLK -.-> DDR3
 ```
 
 ## Design Influences
