@@ -36,6 +36,7 @@ BRANCH_CONDITIONS = {
     'BCC': 0x6, # Carry Clear (Unsigned <)
     'BGE': 0x7, # Signed Greater or Equal (N == V)
     'BLT': 0x8, # Signed Less Than (N != V)
+    'RCALL': 0x9, # Relative Call (PC-relative, pushes return address)
 }
 
 def parse_register(reg_str):
@@ -98,7 +99,7 @@ RESERVED_MNEMONICS = (
     set(OPCODES.keys()) | set(BRANCH_CONDITIONS.keys()) |
     {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
      'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET', 'LUI',
-     'ADC', 'SBC', 'GETF', 'SETF', 'ENTER', 'LEAVE'}
+     'ADC', 'SBC', 'GETF', 'SETF', 'ENTER', 'LEAVE', 'RCALL'}
 )
 
 def count_directive_words(line):

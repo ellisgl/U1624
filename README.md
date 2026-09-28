@@ -24,7 +24,7 @@ J-Type:  [Opcode (4)][Rs (4)][Imm8 (8)]
 B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 ```
 
-### Instructions (41 total)
+### Instructions (42 total)
 
 | Category | Mnemonic | Description | Encoding |
 |----------|----------|-------------|----------|
@@ -55,6 +55,7 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | | `ROR Rd, Rs, Rt` | Rotate right | `0xD` ext, Rd R0–R7 |
 | **Compare** | `CMPI Rs, Imm4` | Compare immediate (sets flags) | `0x5` with Rt=0 |
 | **Control Flow** | `BRA/BEQ/BNE/BMI/BPL/BCS/BCC/BGE/BLT Offset8` | Conditional branch | `0x6` B-Type |
+| | `RCALL Offset8` | Relative call (PC + offset, pushes return addr) | `0x6` B-Type, cond=9 |
 | | `CALL Rs` | Call subroutine (push return addr) | `0x7` |
 | | `RET` | Return from subroutine | `0x7000` |
 | | `JAL Rd, Rs` | Jump and link | `0x7` |
@@ -199,7 +200,8 @@ U1624/
 │   ├── test_status_reg.asm  # GETF/SETF status register test
 │   ├── test_signed_branch.asm # BGE/BLT signed comparison test
 │   ├── test_stack_frame.asm # ENTER/LEAVE stack frame test
-│   └── test_dma.asm         # DMA block transfer test
+│   ├── test_dma.asm         # DMA block transfer test
+│   └── test_rcall.asm       # RCALL relative call test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script
@@ -305,7 +307,7 @@ graph TB
         end
 
         FLAGS["Flags: Z | N | C | V"]
-        BRANCH["Branch Logic\nBRA BEQ BNE BMI BPL BCS BCC BGE BLT"]
+        BRANCH["Branch Logic\nBRA BEQ BNE BMI BPL\nBCS BCC BGE BLT RCALL"]
 
         subgraph interrupt["Interrupt System"]
             INT["Interrupt Logic\nint_enable flag\nVector: 0x0008\nSEI / CLI / IRET"]

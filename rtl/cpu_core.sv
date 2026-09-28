@@ -368,14 +368,29 @@ module cpu_core (
                         // {{16{imm8[7]}}, imm8} is sign extension: it replicates
                         // the sign bit (bit 7) to fill the upper 16 bits.
                         4'h6: begin
-                            if (take_branch) begin
-                                pc       <= pc + {{16{imm8[7]}}, imm8};
-                                mem_addr <= pc + {{16{imm8[7]}}, imm8};
+                            if (cond == 4'h9) begin
+                                // RCALL — relative call with immediate offset
+                                // Like CALL but uses PC-relative addressing (same
+                                // as branches), so you don't need to load the target
+                                // address into a register first. Pushes PC+1 as the
+                                // return address, then jumps to PC + signed_offset.
+                                next_sp         = rf[15] - 1;
+                                rf[15]          <= next_sp;
+                                mem_addr        <= {8'h00, next_sp};
+                                mem_write_data  <= pc + 1;
+                                mem_write_en    <= 1'b1;
+                                pc              <= pc + {{16{imm8[7]}}, imm8};
+                                state           <= S_MEM_WRITE;
                             end else begin
-                                pc       <= pc + 1;
-                                mem_addr <= pc + 1;
+                                if (take_branch) begin
+                                    pc       <= pc + {{16{imm8[7]}}, imm8};
+                                    mem_addr <= pc + {{16{imm8[7]}}, imm8};
+                                end else begin
+                                    pc       <= pc + 1;
+                                    mem_addr <= pc + 1;
+                                end
+                                state <= S_FETCH;
                             end
-                            state <= S_FETCH;
                         end
 
                         // ----- CALL, RET, IRET, SEI, CLI, GETF, SETF -----
