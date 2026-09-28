@@ -490,6 +490,39 @@ module cpu_core (
                                 rf[15]   <= rf[14] + 1;
                                 pc       <= pc + 1;
                                 state    <= S_MEM_READ;
+                            end else if (rd == 4'h8) begin
+                                // BTST Rs, #bit — test bit rt of Rs
+                                // Sets Z and N from the masked result without
+                                // modifying the register.
+                                flag_z   <= ((rs_val & (16'h1 << rt)) == 16'h0000);
+                                flag_n   <= rs_val[15];
+                                pc       <= pc + 1;
+                                mem_addr <= pc + 1;
+                                state    <= S_FETCH;
+                            end else if (rd == 4'h9) begin
+                                // BSET Rs, #bit — set bit rt of Rs
+                                rf[rs]   <= rs_val | (16'h1 << rt);
+                                flag_z   <= ((rs_val | (16'h1 << rt)) == 16'h0000);
+                                flag_n   <= rs_val[15] | (rt == 4'hF);
+                                pc       <= pc + 1;
+                                mem_addr <= pc + 1;
+                                state    <= S_FETCH;
+                            end else if (rd == 4'hA) begin
+                                // BCLR Rs, #bit — clear bit rt of Rs
+                                rf[rs]   <= rs_val & ~(16'h1 << rt);
+                                flag_z   <= ((rs_val & ~(16'h1 << rt)) == 16'h0000);
+                                flag_n   <= (rs_val & ~(16'h1 << rt)) >> 15;
+                                pc       <= pc + 1;
+                                mem_addr <= pc + 1;
+                                state    <= S_FETCH;
+                            end else if (rd == 4'hB) begin
+                                // BTGL Rs, #bit — toggle bit rt of Rs
+                                rf[rs]   <= rs_val ^ (16'h1 << rt);
+                                flag_z   <= ((rs_val ^ (16'h1 << rt)) == 16'h0000);
+                                flag_n   <= (rs_val ^ (16'h1 << rt)) >> 15;
+                                pc       <= pc + 1;
+                                mem_addr <= pc + 1;
+                                state    <= S_FETCH;
                             end else begin
                                 // CALL Rs — call subroutine at address in Rs
                                 // Push the return address (PC+1) onto the stack,

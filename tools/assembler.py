@@ -99,7 +99,8 @@ RESERVED_MNEMONICS = (
     set(OPCODES.keys()) | set(BRANCH_CONDITIONS.keys()) |
     {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
      'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET', 'LUI',
-     'ADC', 'SBC', 'GETF', 'SETF', 'ENTER', 'LEAVE', 'RCALL'}
+     'ADC', 'SBC', 'GETF', 'SETF', 'ENTER', 'LEAVE', 'RCALL',
+     'BTST', 'BSET', 'BCLR', 'BTGL'}
 )
 
 def count_directive_words(line):
@@ -450,6 +451,16 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
         elif mnemonic == 'LEAVE':
             word = 0x7007
             return f"{word:04X} // LEAVE"
+
+        # Handle BTST/BSET/BCLR/BTGL (bit operations: opcode 0x7, rd=0x8-0xB)
+        elif mnemonic in ('BTST', 'BSET', 'BCLR', 'BTGL'):
+            if len(tokens) < 3:
+                raise ValueError(f"{mnemonic} requires a register and bit number (0-15): '{line}'")
+            rs = parse_register(tokens[1])
+            bit_num = parse_immediate(tokens[2], max_bits=4)
+            sub_op = {'BTST': 0x8, 'BSET': 0x9, 'BCLR': 0xA, 'BTGL': 0xB}[mnemonic]
+            word = (OPCODES['CALL'] << 12) | (rs << 8) | (bit_num << 4) | sub_op
+            return f"{word:04X} // {line}"
 
         elif mnemonic == 'NOP':
             word = 0x6001
