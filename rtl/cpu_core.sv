@@ -523,6 +523,13 @@ module cpu_core (
                                 pc       <= pc + 1;
                                 mem_addr <= pc + 1;
                                 state    <= S_FETCH;
+                            end else if (rd == 4'hC) begin
+                                // SWAP Rs, Rt — exchange register contents
+                                rf[rs]   <= rt_val;
+                                rf[rt]   <= rs_val;
+                                pc       <= pc + 1;
+                                mem_addr <= pc + 1;
+                                state    <= S_FETCH;
                             end else begin
                                 // CALL Rs — call subroutine at address in Rs
                                 // Push the return address (PC+1) onto the stack,

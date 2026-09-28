@@ -100,7 +100,7 @@ RESERVED_MNEMONICS = (
     {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
      'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET', 'LUI',
      'ADC', 'SBC', 'GETF', 'SETF', 'ENTER', 'LEAVE', 'RCALL',
-     'BTST', 'BSET', 'BCLR', 'BTGL'}
+     'BTST', 'BSET', 'BCLR', 'BTGL', 'SWAP'}
 )
 
 def count_directive_words(line):
@@ -460,6 +460,15 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
             bit_num = parse_immediate(tokens[2], max_bits=4)
             sub_op = {'BTST': 0x8, 'BSET': 0x9, 'BCLR': 0xA, 'BTGL': 0xB}[mnemonic]
             word = (OPCODES['CALL'] << 12) | (rs << 8) | (bit_num << 4) | sub_op
+            return f"{word:04X} // {line}"
+
+        # Handle SWAP (exchange registers: opcode 0x7, rd=0xC)
+        elif mnemonic == 'SWAP':
+            if len(tokens) < 3:
+                raise ValueError(f"SWAP requires two registers: '{line}'")
+            rs = parse_register(tokens[1])
+            rt = parse_register(tokens[2])
+            word = (OPCODES['CALL'] << 12) | (rs << 8) | (rt << 4) | 0xC
             return f"{word:04X} // {line}"
 
         elif mnemonic == 'NOP':
