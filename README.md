@@ -9,8 +9,10 @@ A custom 16-bit softcore CPU targeting FPGA, inspired by the **65C816**, **Z8000
 - **24-bit address bus** (16MB addressable, flat — no segmentation)
 - **Multi-state FSM** execution: FETCH → EXECUTE → MEM_READ/MEM_WRITE → FETCH
 - **Hardware multiply** (16×16→32) and **divide** with divide-by-zero protection
-- **Single-level interrupts** with fixed vector, automatic PC/flag save-restore
-- **Memory-mapped I/O** at `0xFFF0`–`0xFFFF` with UART, timer, and DMA peripherals
+- **Supervisor/user privilege mode** with automatic mode switching on interrupts, traps, and faults
+- **Memory Protection Unit (MPU)** — 4-region base/limit with per-region permissions
+- **Single-level interrupts** with three vectors (TRAP, IRQ, FAULT), automatic PC/flag/mode save-restore
+- **Memory-mapped I/O** at `0xFFF0`–`0xFFFF` with UART, timer, DMA, and MPU peripherals
 - **DMA controller** for CPU-free memory-to-memory block transfers (2 cycles/word)
 - **Bus ready / wait states** — active-high `bus_ready` input allows slow memory or I/O to stall the CPU
 
@@ -25,7 +27,7 @@ J-Type:  [Opcode (4)][Rs (4)][Imm8 (8)]
 B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 ```
 
-### Instructions (50 total)
+### Instructions (51 total)
 
 | Category | Mnemonic | Description | Encoding |
 |----------|----------|-------------|----------|
@@ -57,6 +59,7 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | **Compare** | `CMPI Rs, Imm4` | Compare immediate (sets flags) | `0x5` with Rt=0 |
 | **Control Flow** | `BRA/BEQ/BNE/BMI/BPL/BCS/BCC/BGE/BLT Offset8` | Conditional branch | `0x6` B-Type |
 | | `RCALL Offset8` | Relative call (PC + offset, pushes return addr) | `0x6` B-Type, cond=9 |
+| | `TRAP Imm8` | Software trap / system call (enters supervisor mode) | `0x6` B-Type, cond=A |
 | | `CALL Rs` | Call subroutine (push return addr) | `0x7` |
 | | `RET` | Return from subroutine | `0x7000` |
 | | `JAL Rd, Rs` | Jump and link | `0x7` |
@@ -99,36 +102,55 @@ The status register can be read/written as a single value with `GETF`/`SETF`:
 | 2 | C | Carry |
 | 3 | I | Interrupt enable |
 | 4 | V | Overflow (signed) |
+| 5 | S | Supervisor mode (1=supervisor, 0=user) |
 
-### Interrupts
+### Interrupts and Exceptions
 
-The CPU supports single-level, non-nestable interrupts with a fixed vector at address `0x0008`.
+The CPU supports three exception types, each with a fixed vector address. All entries push PC and flags (including the saved privilege mode) to the stack, switch to supervisor mode, disable interrupts, and jump to the vector.
+
+| Vector | Address | Trigger | Use |
+|--------|---------|---------|-----|
+| TRAP | `0x0004` | `TRAP n` instruction | System calls |
+| IRQ | `0x0008` | Hardware `irq` input (level-sensitive, active-high) | Peripheral interrupts |
+| FAULT | `0x000C` | MPU access violation | Memory protection |
 
 | Feature | Detail |
 |---------|--------|
-| Vector address | `0x0008` (fixed) |
-| Enable/disable | `SEI` / `CLI` instructions |
-| On entry | Push PC and flags to stack, clear interrupt enable, jump to vector |
-| On `IRET` | Pop flags and PC from stack, re-enable interrupts |
-| Check point | At `S_FETCH` — between instructions, never mid-instruction |
+| Enable/disable | `SEI` / `CLI` instructions (affects IRQ only) |
+| On entry | Save mode, enter supervisor, push PC + flags, disable ints, jump to vector |
+| On `IRET` | Pop flags + PC, restore privilege mode, re-enable interrupts |
+| IRQ check | At `S_FETCH` — between instructions, never mid-instruction |
+| Fault check | At `S_FETCH`, `S_MEM_READ`, `S_MEM_WRITE` — data faults save PC−1 for retry |
 | Nesting | Not supported (interrupts disabled during handler) |
 
-The `irq` input is active-high and level-sensitive. The CPU checks it at the start of each fetch cycle. Programs should place their interrupt handler at address `0x0008` and use a branch at address `0x0000` to skip past it:
+Programs should place handlers at the vector addresses:
 
 ```asm
-    BRA start           ; skip past vector area
-    NOP                 ; padding (addresses 1-7)
-    ...
+    BRA start           ; 0x0000 — skip past vectors
+    NOP                 ; 0x0001
+    NOP                 ; 0x0002
+    NOP                 ; 0x0003
 
-int_handler:            ; address 0x0008
-    ; acknowledge interrupt source
-    ; handle interrupt
+trap_handler:           ; 0x0004 — TRAP vector
+    ; handle system call (trap number in imm8)
     IRET
+
+    NOP                 ; padding to reach 0x0008
+
+irq_handler:            ; 0x0008 — IRQ vector
+    ; acknowledge interrupt source
+    IRET
+
+    NOP                 ; padding to reach 0x000C
+
+fault_handler:          ; 0x000C — FAULT vector
+    ; handle protection fault
+    HALT                ; or adjust return addr and IRET
 
 start:
     LIMM R15, 60        ; init stack pointer
     SEI                 ; enable interrupts
-    ; main program...
+    ; main program (supervisor mode)...
 ```
 
 ### DMA Controller
@@ -162,6 +184,68 @@ The `bus_ready` input allows slow memory or I/O devices to insert wait states. W
 | `S_MEM_WRITE` | Holds — `mem_write_en` stays asserted |
 
 Tie `bus_ready` high for zero-wait-state memory. In the testbench, SRAM addresses >= 50 simulate a slow device with 1 wait state per access.
+
+### Supervisor / User Mode
+
+The CPU has two privilege levels controlled by bit 5 (S) of the status register:
+
+| Mode | S bit | Description |
+|------|-------|-------------|
+| Supervisor | 1 | Full access — MPU bypassed, can modify S bit via `SETF` |
+| User | 0 | Restricted — MPU enforced, `SETF` cannot set S bit |
+
+The CPU starts in supervisor mode on reset. It enters supervisor mode automatically on any exception (IRQ, TRAP, FAULT). The previous mode is saved in the stacked flags word and restored by `IRET`.
+
+To drop to user mode, use the fake-IRET pattern:
+
+```asm
+    LIMM R1, user_entry  ; target address
+    PUSH R1               ; push as return PC
+    GETF R1               ; get current flags
+    LIMM R3, 0xDF
+    LUI  R3, 0xFF         ; mask = 0xFFDF (clear S bit)
+    AND  R1, R1, R3
+    PUSH R1               ; push flags with S=0
+    IRET                   ; "return" to user mode
+```
+
+### Memory Protection Unit (MPU)
+
+The MPU provides 4 memory regions with base/limit bounds checking and per-region permissions. It is memory-mapped at `0xFFFC`–`0xFFFF` using indirect register access.
+
+| Address | Register | Description |
+|---------|----------|-------------|
+| `0xFFFC` | Control | `[15]` = global enable, `[1:0]` = region select (0–3) |
+| `0xFFFD` | Base | Base address of selected region |
+| `0xFFFE` | Limit | Limit address of selected region (inclusive) |
+| `0xFFFF` | Permissions | Permission bits of selected region |
+
+**Permission bits** (per region):
+
+| Bit | Meaning |
+|-----|---------|
+| 0 | User read (and execute) |
+| 1 | User write |
+| 7 | Region enable |
+
+**How it works:** When the MPU is enabled and the CPU is in user mode, every memory access is checked against all enabled regions in parallel. If any region covers the address and grants the requested permission (read or write), the access proceeds. If no region matches, a fault is raised (vector `0x000C`). Supervisor mode bypasses all MPU checks.
+
+```asm
+    ; Configure region 0: addresses 20-49, user read/write
+    LIMM R0, 0xFC
+    LUI  R0, 0xFF         ; R0 = 0xFFFC (MPU base)
+    LIMM R1, 0
+    STORE R1, [R0 + 0]    ; select region 0, MPU off
+    LIMM R1, 20
+    STORE R1, [R0 + 1]    ; base = 20
+    LIMM R1, 49
+    STORE R1, [R0 + 2]    ; limit = 49
+    LIMM R1, 0x83
+    STORE R1, [R0 + 3]    ; perms = enabled | user R/W
+    LIMM R1, 0x00
+    LUI  R1, 0x80         ; R1 = 0x8000 (global enable)
+    STORE R1, [R0 + 0]    ; enable MPU
+```
 
 ### Building 16-bit Addresses
 
@@ -208,6 +292,7 @@ my_func:
 U1624/
 ├── rtl/
 │   ├── cpu_core.sv          # CPU core RTL (SystemVerilog)
+│   ├── mpu.sv               # Memory Protection Unit (4 regions)
 │   ├── timer.sv             # Countdown timer peripheral
 │   └── dma_controller.sv   # DMA controller for block transfers
 ├── tests/
@@ -226,7 +311,8 @@ U1624/
 │   ├── test_wait_states.asm # Bus ready / wait state test
 │   ├── test_bit_ops.asm     # BTST/BSET/BCLR/BTGL bit operation test
 │   ├── test_swap.asm        # SWAP register exchange test
-│   └── test_string_ops.asm  # MOVSW/LODSW/STOSW block move test
+│   ├── test_string_ops.asm  # MOVSW/LODSW/STOSW block move test
+│   └── test_mpu.asm         # MPU / supervisor mode / TRAP test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script
@@ -236,7 +322,7 @@ U1624/
 
 ### Assembler
 
-The Python assembler is a standalone CLI tool supporting symbolic labels, all 33 instructions, and data directives:
+The Python assembler is a standalone CLI tool supporting symbolic labels, all instructions, and data directives:
 
 ```bash
 # Assemble a source file to program.hex (default output)
@@ -297,7 +383,10 @@ bash run_sim.sh my_program.asm         # run a custom program
 | `0x00FFF9` | DMA Destination Address (R/W) |
 | `0x00FFFA` | DMA Transfer Length in words (R/W) |
 | `0x00FFFB` | DMA Control/Status (R/W) — bit 0: start/busy, bit 1: int enable, bit 2: done |
-| `0x00FFFC`–`0x00FFFF` | Reserved I/O |
+| `0x00FFFC` | MPU Control (R/W) — bit 15: enable, bits 1:0: region select |
+| `0x00FFFD` | MPU Region Base Address (R/W) |
+| `0x00FFFE` | MPU Region Limit Address (R/W) |
+| `0x00FFFF` | MPU Region Permissions (R/W) — bit 7: enable, bit 1: user W, bit 0: user R |
 
 ### Interrupt Sources
 
@@ -331,12 +420,14 @@ graph TB
             MULDIV["MUL/DIV Unit\n16×16 → 32-bit"]
         end
 
-        FLAGS["Flags: Z | N | C | V"]
+        FLAGS["Flags: Z | N | C | V | S"]
         BRANCH["Branch Logic\nBRA BEQ BNE BMI BPL\nBCS BCC BGE BLT RCALL"]
 
-        subgraph interrupt["Interrupt System"]
-            INT["Interrupt Logic\nint_enable flag\nVector: 0x0008\nSEI / CLI / IRET"]
+        subgraph interrupt["Exception System"]
+            INT["Exception Logic\nTRAP: 0x0004\nIRQ: 0x0008\nFAULT: 0x000C\nSEI / CLI / IRET"]
         end
+
+        MODE["Privilege Mode\nsupervisor / user"]
 
         FSM["FSM Controller — 8 states\nFETCH → EXECUTE → MEM_R/W\nINT_PUSH_PC → INT_PUSH_FLAGS\nIRET_FLAGS | HALTED"]
 
@@ -360,8 +451,10 @@ graph TB
     FSM -->|"state ctrl"| MEM
     PC -->|"addr"| MEM
 
+    MODE -->|"supervisor"| core
     HOLD_IN(["hold"]) -.-> FSM
     READY_IN(["bus_ready"]) -.-> FSM
+    FAULT_IN(["mpu_fault"]) -.-> FSM
 
     IRQ_IN(["irq"]) --> INT
 ```
@@ -375,24 +468,28 @@ stateDiagram-v2
     [*] --> FETCH : reset
 
     FETCH --> EXECUTE : latch IR, advance PC
-    FETCH --> INT_PUSH_PC : irq && int_enable
+    FETCH --> INT_PUSH_PC : irq && int_enable (→ 0x0008)
+    FETCH --> INT_PUSH_PC : mpu_fault (→ 0x000C)
 
     EXECUTE --> FETCH : 1-cycle ops (LIMM, LUI, ALU, Branch, SEI, CLI)
     EXECUTE --> MEM_READ : LOAD, POP, RET
     EXECUTE --> MEM_WRITE : STORE, PUSH, CALL
+    EXECUTE --> INT_PUSH_PC : TRAP (→ 0x0004)
     EXECUTE --> IRET_FLAGS : IRET
     EXECUTE --> HALTED : HALT
 
     FETCH --> FETCH : !bus_ready (wait state)
     MEM_READ --> MEM_READ : !bus_ready (wait state)
+    MEM_READ --> INT_PUSH_PC : mpu_fault (→ 0x000C, PC−1)
     MEM_READ --> FETCH : bus_ready, data → register or PC (RET)
     MEM_WRITE --> MEM_WRITE : !bus_ready (wait state)
+    MEM_WRITE --> INT_PUSH_PC : mpu_fault (→ 0x000C, PC−1)
     MEM_WRITE --> FETCH : bus_ready, write complete
 
     INT_PUSH_PC --> INT_PUSH_FLAGS : push PC to stack
-    INT_PUSH_FLAGS --> MEM_WRITE : push flags, disable ints, PC ← 0x0008
+    INT_PUSH_FLAGS --> MEM_WRITE : push flags+mode, supervisor, PC ← vector
 
-    IRET_FLAGS --> MEM_READ : restore flags, enable ints, pop PC
+    IRET_FLAGS --> MEM_READ : restore flags, pop PC, restore mode
 
     HALTED --> [*]
 ```
@@ -407,9 +504,12 @@ graph LR
         UART["UART\nTX: 0xFFF0\nRX: 0xFFF6–7\nStatus: 0xFFF1"]
         TIMER["Timer\n0xFFF2–0xFFF5\nCountdown\nAuto-reload\ntimer.sv"]
         DMA["DMA Controller\n0xFFF8–0xFFFB\nBlock Transfer\ndma_controller.sv"]
+        MPU["MPU\n0xFFFC–0xFFFF\n4 regions\nmpu.sv"]
     end
 
-    CPU["CPU Core\ncpu_core.sv\n16 GPRs · 24-bit PC\nALU · MUL/DIV\n8-state FSM"] <-->|"addr/data"| bus
+    CPU["CPU Core\ncpu_core.sv\n16 GPRs · 24-bit PC\nALU · MUL/DIV\n8-state FSM\nSupervisor/User"] <-->|"addr/data"| bus
+    CPU -->|"supervisor"| MPU
+    MPU -->|"mpu_fault"| CPU
 
     subgraph arb["Bus Arbitration"]
         MUX{"bus mux\nCPU ↔ DMA"}
