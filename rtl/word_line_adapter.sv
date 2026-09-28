@@ -36,6 +36,16 @@ module word_line_adapter (
 
     assign word_ready = (state == S_IDLE);
 
+    // Compute lane-placed data and enable mask combinationally
+    reg [127:0] placed_data;
+    reg [15:0]  placed_enable;
+    always @(*) begin
+        placed_data   = 128'b0;
+        placed_enable = 16'b0;
+        placed_data[word_address[2:0] * 16 +: 16]  = word_write_data;
+        placed_enable[word_address[2:0] * 2 +: 2]  = 2'b11;
+    end
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state               <= S_IDLE;
@@ -54,20 +64,13 @@ module word_line_adapter (
                 S_IDLE: begin
                     line_request <= 1'b0;
                     if (word_request) begin
-                        line_write   <= word_write;
-                        line_address <= word_address[23:3];
-                        word_lane    <= word_address[2:0];
-
-                        // Place word data at the correct lane within the 128-bit line
-                        line_write_data <= 128'b0;
-                        line_write_data[word_address[2:0] * 16 +: 16] <= word_write_data;
-
-                        // Enable 2 bytes for this word position
-                        line_write_enable <= 16'b0;
-                        line_write_enable[word_address[2:0] * 2 +: 2] <= 2'b11;
-
-                        line_request <= 1'b1;
-                        state        <= S_ISSUE;
+                        line_write        <= word_write;
+                        line_address      <= word_address[23:3];
+                        word_lane         <= word_address[2:0];
+                        line_write_data   <= placed_data;
+                        line_write_enable <= placed_enable;
+                        line_request      <= 1'b1;
+                        state             <= S_ISSUE;
                     end
                 end
 

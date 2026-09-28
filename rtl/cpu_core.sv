@@ -798,7 +798,7 @@ module cpu_core (
                     next_sp         = rf[15] - 1;
                     rf[15]          <= next_sp;
                     mem_addr        <= {8'h00, next_sp};
-                    mem_write_data  <= {10'b0, saved_mode, flag_v, 1'b0, flag_c, flag_n, flag_z};
+                    mem_write_data  <= {10'b0, saved_mode, flag_v, int_enable, flag_c, flag_n, flag_z};
                     mem_write_en    <= 1'b1;
                     int_enable      <= 1'b0;              // Disable interrupts during handler
                     mode            <= 1'b1;              // Ensure supervisor mode
@@ -820,9 +820,9 @@ module cpu_core (
                     flag_z     <= mem_read_data[0];
                     flag_n     <= mem_read_data[1];
                     flag_c     <= mem_read_data[2];
+                    int_enable <= mem_read_data[3];
                     flag_v     <= mem_read_data[4];
                     saved_mode <= mem_read_data[5];
-                    int_enable <= 1'b1;
 
                     // Set up to pop the return address (PC) next
                     mem_addr   <= {8'h00, rf[15]};
@@ -886,8 +886,8 @@ module cpu_core (
                     alu_wide = {1'b0, rs_val} + {1'b0, ~{12'h000, imm4}} + 17'd1;
                     alu_result   = alu_wide[15:0];
                     alu_carry    = alu_wide[16];
-                    // SUB overflow: operands differ in sign, result sign differs from Rs
-                    alu_overflow = (rs_val[15] != imm4[3]) && (alu_result[15] != rs_val[15]);
+                    // SUB overflow: zero-extended imm4 is always positive (sign bit = 0)
+                    alu_overflow = rs_val[15] && (alu_result[15] != rs_val[15]);
                 end else begin
                     // ADDI: add immediate
                     alu_wide = {1'b0, rs_val} + {13'b0, imm4};

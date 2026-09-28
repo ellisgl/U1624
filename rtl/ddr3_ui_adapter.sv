@@ -77,7 +77,7 @@ module ddr3_ui_adapter #(
                         // 128-bit line → 256-bit beat: line_address[0] selects upper/lower half
                         // DDR3 address is in 32-bit words, 8 words per 256-bit beat
                         half_select <= line_address[0];
-                        ctrl_addr   <= {line_address[20:1], 8'b0};
+                        ctrl_addr   <= {6'b0, line_address[20:1], 3'b0};
 
                         if (line_write) begin
                             ctrl_cmd <= CMD_WRITE;
