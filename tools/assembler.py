@@ -37,6 +37,7 @@ BRANCH_CONDITIONS = {
     'BGE': 0x7, # Signed Greater or Equal (N == V)
     'BLT': 0x8, # Signed Less Than (N != V)
     'RCALL': 0x9, # Relative Call (PC-relative, pushes return address)
+    'TRAP':  0xA, # Software trap (system call, enters supervisor mode)
 }
 
 def parse_register(reg_str):
@@ -100,7 +101,8 @@ RESERVED_MNEMONICS = (
     {'NOP', 'RET', 'JAL', 'HALT', 'CMPI', 'MUL', 'MULH', 'DIV', 'MOD',
      'MOV', 'NOT', 'NEG', 'ROL', 'ROR', 'SEI', 'CLI', 'IRET', 'LUI',
      'ADC', 'SBC', 'GETF', 'SETF', 'ENTER', 'LEAVE', 'RCALL',
-     'BTST', 'BSET', 'BCLR', 'BTGL', 'SWAP'}
+     'BTST', 'BSET', 'BCLR', 'BTGL', 'SWAP',
+     'MOVSW', 'LODSW', 'STOSW', 'TRAP'}
 )
 
 def count_directive_words(line):
@@ -379,6 +381,15 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
             word = (OPCODES['POP'] << 12) | (rd << 8)
             return f"{word:04X} // {line}"
 
+        # Handle TRAP instruction (software trap / system call)
+        elif mnemonic == 'TRAP':
+            if len(tokens) < 2:
+                raise ValueError(f"TRAP requires a trap number (0-255): '{line}'")
+            trap_num = parse_immediate(tokens[1], max_bits=8)
+            cond = BRANCH_CONDITIONS['TRAP']
+            word = (OPCODES['BRANCH'] << 12) | (cond << 8) | trap_num
+            return f"{word:04X} // {line}"
+
         # 5. Handle Conditional Branches — supports label targets
         elif mnemonic in BRANCH_CONDITIONS:
             if len(tokens) < 2:
@@ -469,6 +480,16 @@ def assemble_line(line, line_num, labels=None, current_addr=0):
             rs = parse_register(tokens[1])
             rt = parse_register(tokens[2])
             word = (OPCODES['CALL'] << 12) | (rs << 8) | (rt << 4) | 0xC
+            return f"{word:04X} // {line}"
+
+        # Handle MOVSW/LODSW/STOSW (block/string ops: opcode 0x7, rd=0xD/0xE/0xF)
+        elif mnemonic in ('MOVSW', 'LODSW', 'STOSW'):
+            if len(tokens) < 3:
+                raise ValueError(f"{mnemonic} requires two registers: '{line}'")
+            rs = parse_register(tokens[1])
+            rt = parse_register(tokens[2])
+            sub_op = {'MOVSW': 0xD, 'LODSW': 0xE, 'STOSW': 0xF}[mnemonic]
+            word = (OPCODES['CALL'] << 12) | (rs << 8) | (rt << 4) | sub_op
             return f"{word:04X} // {line}"
 
         elif mnemonic == 'NOP':

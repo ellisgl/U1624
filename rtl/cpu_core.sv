@@ -54,7 +54,15 @@ module cpu_core (
     // wait states by stalling in FETCH, MEM_READ, or MEM_WRITE until
     // the device signals it is ready. Modeled after the Z80/8086 READY
     // pin. Tie high for zero-wait-state memory.
-    input  wire        bus_ready
+    input  wire        bus_ready,
+
+    // MPU fault — raised by the MPU when an access is denied.
+    // Causes the CPU to enter the fault handler at FAULT_VECTOR.
+    input  wire        mpu_fault,
+
+    // Supervisor mode output — active when CPU is in supervisor mode.
+    // Used by the MPU to bypass protection checks.
+    output wire        supervisor
 );
 
     // =========================================================================
@@ -78,10 +86,10 @@ module cpu_core (
                      S_INT_PUSH_FLAGS = 4'd6, // Interrupt: save CPU flags
                      S_IRET_FLAGS     = 4'd7; // Interrupt return: restore flags
 
-    // Fixed address where the interrupt handler must be located.
-    // When an interrupt fires, the CPU jumps here. The programmer must place
-    // their interrupt service routine (ISR) at this address.
-    localparam [23:0] INT_VECTOR = 24'h000008;
+    // Interrupt/exception vectors
+    localparam [23:0] TRAP_VECTOR  = 24'h000004; // Software trap (TRAP instruction)
+    localparam [23:0] INT_VECTOR   = 24'h000008; // Hardware interrupt (IRQ)
+    localparam [23:0] FAULT_VECTOR = 24'h00000C; // MPU protection fault
 
     // =========================================================================
     // CPU Registers
@@ -110,6 +118,17 @@ module cpu_core (
     // Also cleared automatically on interrupt entry (prevents nested interrupts)
     // and restored on IRET (interrupt return).
     reg int_enable;
+
+    // Privilege mode: 1=supervisor, 0=user.
+    // Starts in supervisor mode on reset. Enters supervisor on interrupt,
+    // trap, or fault. Returns to saved mode on IRET.
+    reg mode;
+    reg saved_mode;
+
+    // Vector target — selects which vector the INT_PUSH sequence jumps to.
+    reg [23:0] int_vector_target;
+
+    assign supervisor = mode;
 
     // =========================================================================
     // Instruction Decode — Wire Slices
@@ -219,6 +238,9 @@ module cpu_core (
             mem_write_data <= 16'h0000;
             mem_write_en   <= 1'b0;
             int_enable     <= 1'b0;        // Interrupts disabled on reset
+            mode           <= 1'b1;        // Start in supervisor mode
+            saved_mode     <= 1'b1;
+            int_vector_target <= INT_VECTOR;
 
             // Clear all 16 registers to zero
             for (i = 0; i < 16; i = i + 1)
@@ -237,11 +259,20 @@ module cpu_core (
                 // instruction. This ensures interrupts are handled between
                 // instructions, never mid-instruction.
                 S_FETCH: begin
-                    if (!bus_ready) begin
+                    if (mpu_fault) begin
+                        // MPU fault on instruction fetch
+                        saved_mode       <= mode;
+                        mode             <= 1'b1;
+                        int_vector_target <= FAULT_VECTOR;
+                        state            <= S_INT_PUSH_PC;
+                    end else if (!bus_ready) begin
                         // Wait state — memory/device not ready yet.
                     end else if (irq && int_enable) begin
                         // Interrupt requested! Enter the interrupt sequence.
-                        state <= S_INT_PUSH_PC;
+                        saved_mode       <= mode;
+                        mode             <= 1'b1;
+                        int_vector_target <= INT_VECTOR;
+                        state            <= S_INT_PUSH_PC;
                     end else begin
                         // Normal fetch: latch the instruction and move to execute.
                         instr_reg    <= mem_read_data;
@@ -377,7 +408,17 @@ module cpu_core (
                         // {{16{imm8[7]}}, imm8} is sign extension: it replicates
                         // the sign bit (bit 7) to fill the upper 16 bits.
                         4'h6: begin
-                            if (cond == 4'h9) begin
+                            if (cond == 4'hA) begin
+                                // TRAP — software trap (system call)
+                                // Enters supervisor mode and jumps to TRAP_VECTOR.
+                                // The 8-bit immediate is available to the handler
+                                // as the trap number (convention, not hardware).
+                                saved_mode        <= mode;
+                                mode              <= 1'b1;
+                                int_vector_target <= TRAP_VECTOR;
+                                pc                <= pc + 1;
+                                state             <= S_INT_PUSH_PC;
+                            end else if (cond == 4'h9) begin
                                 // RCALL — relative call with immediate offset
                                 // Like CALL but uses PC-relative addressing (same
                                 // as branches), so you don't need to load the target
@@ -444,26 +485,29 @@ module cpu_core (
                             end else if (imm8 == 8'h04) begin
                                 // GETF Rs — read status register into Rs
                                 // Packs all CPU flags into a single 16-bit value.
-                                // Bit layout: {11'b0, V, I, C, N, Z}
+                                // Bit layout: {10'b0, S, V, I, C, N, Z}
                                 //   Bit 0: Z (zero flag)
                                 //   Bit 1: N (negative flag)
                                 //   Bit 2: C (carry flag)
                                 //   Bit 3: I (interrupt enable)
                                 //   Bit 4: V (signed overflow flag)
-                                rf[rs] <= {11'b0, flag_v, int_enable, flag_c, flag_n, flag_z};
+                                //   Bit 5: S (supervisor mode)
+                                rf[rs] <= {10'b0, mode, flag_v, int_enable, flag_c, flag_n, flag_z};
                                 pc         <= pc + 1;
                                 mem_addr   <= pc + 1;
                                 state      <= S_FETCH;
                             end else if (imm8 == 8'h05) begin
                                 // SETF Rs — write status register from Rs
-                                // Restores flags from a register value, using the
-                                // same bit layout as GETF. Useful for saving and
-                                // restoring CPU state across context switches.
+                                // Bit layout matches GETF. The S bit (bit 5) can
+                                // only be changed from supervisor mode — user mode
+                                // code cannot escalate its own privilege.
                                 flag_z     <= rs_val[0];
                                 flag_n     <= rs_val[1];
                                 flag_c     <= rs_val[2];
                                 int_enable <= rs_val[3];
                                 flag_v     <= rs_val[4];
+                                if (mode)
+                                    mode   <= rs_val[5];
                                 pc         <= pc + 1;
                                 mem_addr   <= pc + 1;
                                 state      <= S_FETCH;
@@ -530,6 +574,30 @@ module cpu_core (
                                 pc       <= pc + 1;
                                 mem_addr <= pc + 1;
                                 state    <= S_FETCH;
+                            end else if (rd == 4'hD) begin
+                                // MOVSW Rs, Rt — block move step
+                                // Phase 1: read from [Rs], auto-increment Rs.
+                                // Phase 2 happens in S_MEM_READ → S_MEM_WRITE.
+                                mem_addr <= {8'h00, rs_val};
+                                rf[rs]   <= rs_val + 1;
+                                pc       <= pc + 1;
+                                state    <= S_MEM_READ;
+                            end else if (rd == 4'hE) begin
+                                // LODSW Rs, Rt — load and advance
+                                // Rs ← mem[Rt], Rt auto-incremented.
+                                mem_addr <= {8'h00, rt_val};
+                                rf[rt]   <= rt_val + 1;
+                                pc       <= pc + 1;
+                                state    <= S_MEM_READ;
+                            end else if (rd == 4'hF) begin
+                                // STOSW Rs, Rt — store and advance
+                                // mem[Rs] ← Rt, Rs auto-incremented.
+                                mem_addr       <= {8'h00, rs_val};
+                                mem_write_data <= rt_val;
+                                mem_write_en   <= 1'b1;
+                                rf[rs]         <= rs_val + 1;
+                                pc             <= pc + 1;
+                                state          <= S_MEM_WRITE;
                             end else begin
                                 // CALL Rs — call subroutine at address in Rs
                                 // Push the return address (PC+1) onto the stack,
@@ -624,31 +692,55 @@ module cpu_core (
                 // What we do with the data depends on which instruction started
                 // the read — we check the opcode and instruction bits to decide.
                 S_MEM_READ: begin
-                    if (!bus_ready) begin
+                    if (mpu_fault) begin
+                        // MPU fault on data read — retry after handler
+                        pc                <= pc - 1;
+                        saved_mode        <= mode;
+                        mode              <= 1'b1;
+                        int_vector_target <= FAULT_VECTOR;
+                        state             <= S_INT_PUSH_PC;
+                    end else if (!bus_ready) begin
                         // Wait state — memory/device not ready yet.
                     end else begin
                         if (opcode == 4'h3) begin
                             // POP — write the popped value to the destination register
                             rf[rs]   <= mem_read_data;
                             mem_addr <= pc;
+                            state    <= S_FETCH;
                         end else if (opcode == 4'h7 && instr[11:0] == 12'h000) begin
                             // RET — the value is the return address; load it into PC
                             pc       <= {8'h00, mem_read_data};
                             mem_addr <= {8'h00, mem_read_data};
+                            state    <= S_FETCH;
                         end else if (opcode == 4'h7 && instr[11:0] == 12'h001) begin
-                            // IRET (second phase) — restore PC from stack
+                            // IRET (second phase) — restore PC and privilege mode
                             pc       <= {8'h00, mem_read_data};
                             mem_addr <= {8'h00, mem_read_data};
+                            mode     <= saved_mode;
+                            state    <= S_FETCH;
                         end else if (opcode == 4'h7 && imm8 == 8'h07) begin
                             // LEAVE (second phase) — restore frame pointer
                             rf[14]   <= mem_read_data;
                             mem_addr <= pc;
+                            state    <= S_FETCH;
+                        end else if (opcode == 4'h7 && rd == 4'hD) begin
+                            // MOVSW phase 2: write read data to [Rt], Rt++
+                            mem_addr       <= {8'h00, rt_val};
+                            mem_write_data <= mem_read_data;
+                            mem_write_en   <= 1'b1;
+                            rf[rt]         <= rt_val + 1;
+                            state          <= S_MEM_WRITE;
+                        end else if (opcode == 4'h7 && rd == 4'hE) begin
+                            // LODSW phase 2: store loaded value in Rs
+                            rf[rs]   <= mem_read_data;
+                            mem_addr <= pc;
+                            state    <= S_FETCH;
                         end else begin
                             // LOAD — write the loaded value to the destination register
                             rf[rt]   <= mem_read_data;
                             mem_addr <= pc;
+                            state    <= S_FETCH;
                         end
-                        state <= S_FETCH;
                     end
                 end
 
@@ -658,7 +750,15 @@ module cpu_core (
                 // The write was initiated in the previous state. Here we just
                 // deassert the write enable and return to FETCH.
                 S_MEM_WRITE: begin
-                    if (bus_ready) begin
+                    if (mpu_fault) begin
+                        // MPU fault on data write — cancel write and enter fault handler
+                        mem_write_en      <= 1'b0;
+                        pc                <= pc - 1;
+                        saved_mode        <= mode;
+                        mode              <= 1'b1;
+                        int_vector_target <= FAULT_VECTOR;
+                        state             <= S_INT_PUSH_PC;
+                    end else if (bus_ready) begin
                         mem_write_en <= 1'b0;  // Done writing
                         mem_addr     <= pc;     // Set up address for next fetch
                         state        <= S_FETCH;
@@ -694,14 +794,16 @@ module cpu_core (
 
                 S_INT_PUSH_FLAGS: begin
                     // Push flags onto the stack (pre-decrement SP)
+                    // Saved mode goes into bit 5 so IRET can restore it.
                     next_sp         = rf[15] - 1;
                     rf[15]          <= next_sp;
                     mem_addr        <= {8'h00, next_sp};
-                    mem_write_data  <= {11'b0, flag_v, 1'b0, flag_c, flag_n, flag_z}; // Pack flags (bit 3 reserved for I)
+                    mem_write_data  <= {10'b0, saved_mode, flag_v, 1'b0, flag_c, flag_n, flag_z};
                     mem_write_en    <= 1'b1;
-                    int_enable      <= 1'b0;       // Disable interrupts during handler
-                    pc              <= INT_VECTOR;  // Jump to interrupt handler (0x0008)
-                    state           <= S_MEM_WRITE; // Finish the write, then FETCH
+                    int_enable      <= 1'b0;              // Disable interrupts during handler
+                    mode            <= 1'b1;              // Ensure supervisor mode
+                    pc              <= int_vector_target;  // Jump to appropriate vector
+                    state           <= S_MEM_WRITE;
                 end
 
                 // =============================================================
@@ -711,12 +813,16 @@ module cpu_core (
                 // This state handles the flags; it then transitions to MEM_READ
                 // which handles the PC restoration.
                 S_IRET_FLAGS: begin
-                    // Restore flags from the value we just read from the stack
+                    // Restore flags from the saved word. Mode is stashed
+                    // in saved_mode and applied in S_MEM_READ when the
+                    // return PC is loaded — this keeps the stack pop in
+                    // supervisor mode so the MPU doesn't block it.
                     flag_z     <= mem_read_data[0];
                     flag_n     <= mem_read_data[1];
                     flag_c     <= mem_read_data[2];
                     flag_v     <= mem_read_data[4];
-                    int_enable <= 1'b1;            // Re-enable interrupts
+                    saved_mode <= mem_read_data[5];
+                    int_enable <= 1'b1;
 
                     // Set up to pop the return address (PC) next
                     mem_addr   <= {8'h00, rf[15]};
@@ -809,13 +915,13 @@ module cpu_core (
                 // SUB overflow: operands differ in sign, result sign differs from Rs
                 alu_overflow = (rs_val[15] != rt_val[15]) && (alu_result[15] != rs_val[15]);
             end
-            4'h9:    alu_result = rs_val & rt_val;          // AND — bitwise AND
-            4'hA:    alu_result = rs_val | rt_val;          // OR  — bitwise OR
-            4'hB:    alu_result = (rs == rt) ? ~rs_val              // NOT — bitwise complement (when Rs==Rt)
-                                              : (rs_val ^ rt_val);  // XOR — bitwise exclusive OR
-            4'hC:    alu_result = rd[3] ? (rs_val << rt_val[3:0]) | (rs_val >> (5'd16 - {1'b0, rt_val[3:0]})) // ROL — rotate left
-                                        : (rs_val << rt_val[3:0]);  // SHL — shift left (zeros fill)
-            4'hD:    alu_result = rd[3] ? (rs_val >> rt_val[3:0]) | (rs_val << (5'd16 - {1'b0, rt_val[3:0]})) // ROR — rotate right
+            4'h9:    alu_result = rs_val & rt_val;                                                              // AND — bitwise AND
+            4'hA:    alu_result = rs_val | rt_val;                                                              // OR  — bitwise OR
+            4'hB:    alu_result = (rs == rt) ? ~rs_val                                                          // NOT — bitwise complement (when Rs==Rt)
+                                              : (rs_val ^ rt_val);                                              // XOR — bitwise exclusive OR
+            4'hC:    alu_result = rd[3] ? (rs_val << rt_val[3:0]) | (rs_val >> (5'd16 - {1'b0, rt_val[3:0]}))   // ROL — rotate left
+                                        : (rs_val << rt_val[3:0]);                                              // SHL — shift left (zeros fill)
+            4'hD:    alu_result = rd[3] ? (rs_val >> rt_val[3:0]) | (rs_val << (5'd16 - {1'b0, rt_val[3:0]}))   // ROR — rotate right
                                         : (rs_val >> rt_val[3:0]);  // SHR — shift right (zeros fill)
             default: alu_result = 16'h0000;
         endcase

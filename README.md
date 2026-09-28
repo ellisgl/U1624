@@ -25,7 +25,7 @@ J-Type:  [Opcode (4)][Rs (4)][Imm8 (8)]
 B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 ```
 
-### Instructions (47 total)
+### Instructions (50 total)
 
 | Category | Mnemonic | Description | Encoding |
 |----------|----------|-------------|----------|
@@ -68,6 +68,9 @@ B-Type:  [Opcode (4)][Cond (4)][Offset8 (8)]
 | **Stack Frame** | `ENTER n` | Set up stack frame (n = 0–15 local words) | `0x7n06` |
 | | `LEAVE` | Tear down stack frame | `0x7007` |
 | **Register** | `SWAP Rs, Rt` | Exchange register contents | `0x7` Rs, Rt, Rd=C |
+| **Block/String** | `MOVSW Rs, Rt` | Copy mem[Rs]→mem[Rt], Rs++, Rt++ | `0x7` Rs, Rt, Rd=D |
+| | `LODSW Rs, Rt` | Rs ← mem[Rt], Rt++ | `0x7` Rs, Rt, Rd=E |
+| | `STOSW Rs, Rt` | mem[Rs] ← Rt, Rs++ | `0x7` Rs, Rt, Rd=F |
 | **Bit Ops** | `BTST Rs, #bit` | Test bit (sets Z flag) | `0x7` Rs, bit=Rt, Rd=8 |
 | | `BSET Rs, #bit` | Set bit in Rs | `0x7` Rs, bit=Rt, Rd=9 |
 | | `BCLR Rs, #bit` | Clear bit in Rs | `0x7` Rs, bit=Rt, Rd=A |
@@ -222,7 +225,8 @@ U1624/
 │   ├── test_rcall.asm       # RCALL relative call test
 │   ├── test_wait_states.asm # Bus ready / wait state test
 │   ├── test_bit_ops.asm     # BTST/BSET/BCLR/BTGL bit operation test
-│   └── test_swap.asm        # SWAP register exchange test
+│   ├── test_swap.asm        # SWAP register exchange test
+│   └── test_string_ops.asm  # MOVSW/LODSW/STOSW block move test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script

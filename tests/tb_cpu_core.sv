@@ -39,6 +39,32 @@ module tb_cpu_core;
     wire is_io = (mem_addr[15:4] == 12'hFFF);
 
     // ---------------------------------------------------------
+    // MPU — Memory Protection Unit
+    // ---------------------------------------------------------
+    wire        supervisor;
+    wire        mpu_fault_raw;
+    wire        mpu_fault = !dma_active && mpu_fault_raw;
+    wire [15:0] mpu_read_data;
+
+    // MPU registers mapped at 0xFFFC-0xFFFF
+    wire        mpu_select = is_io && (mem_addr[3:0] >= 4'hC);
+    wire [1:0]  mpu_reg_addr = mem_addr[1:0];
+    wire        mpu_write_en = mem_write_en && mpu_select && !mpu_fault;
+
+    mpu mpu0 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .reg_addr(mpu_reg_addr),
+        .write_data(mem_write_data),
+        .write_en(mpu_write_en),
+        .read_data(mpu_read_data),
+        .check_addr(mem_addr[15:0]),
+        .check_write(mem_write_en),
+        .supervisor(supervisor),
+        .fault(mpu_fault_raw)
+    );
+
+    // ---------------------------------------------------------
     // Wait State Generator — slow memory at addresses 50+
     // ---------------------------------------------------------
     // Simulates a slow memory region by deasserting bus_ready for
@@ -92,7 +118,9 @@ module tb_cpu_core;
         .mem_write_en(cpu_mem_write_en),
         .irq(irq),
         .hold(dma_active),
-        .bus_ready(bus_ready)
+        .bus_ready(bus_ready),
+        .mpu_fault(mpu_fault),
+        .supervisor(supervisor)
     );
 
     // Instantiate Timer Peripheral
@@ -134,7 +162,9 @@ module tb_cpu_core;
     reg [15:0] io_read_data;
 
     always @(*) begin
-        if (timer_select)
+        if (mpu_select)
+            io_read_data = mpu_read_data;
+        else if (timer_select)
             io_read_data = timer_read_data;
         else if (dma_select)
             io_read_data = dma_read_data;
@@ -191,9 +221,11 @@ module tb_cpu_core;
                         $display("[IO WRITE] Unknown register 0x%h | Data: 0x%h", mem_addr, mem_write_data);
                     end
                 endcase
-            end else begin
+            end else if (!mpu_fault) begin
                 sram[mem_addr[5:0]] <= mem_write_data;
                 $display("[MEM WRITE] Addr: 0x%h | Data: 0x%h", mem_addr, mem_write_data);
+            end else begin
+                $display("[MPU FAULT] Write blocked at addr 0x%h", mem_addr);
             end
         end
     end
@@ -227,11 +259,35 @@ module tb_cpu_core;
                 $display("[SIMULATION PASSED] PDP-16 instructions verified:");
                 $display("  MOV=0x%h  NOT=0x%h  NEG=0x%h", sram[30], sram[31], sram[32]);
                 $display("  ROL=0x%h  ROR=0x%h\n", sram[33], sram[34]);
+            end else if (sram[30] == 16'h00BB && sram[31] == 16'h00AA &&
+                         sram[32] == 16'h0033) begin
+                $display("[SIMULATION PASSED] SWAP test verified:");
+                $display("  Swap R0=0x%h  Swap R1=0x%h  Self-swap=0x%h\n",
+                         sram[30], sram[31], sram[32]);
+            end else if (sram[30] == 16'h1111 && sram[31] == 16'h2222 &&
+                         sram[32] == 16'h3333 && sram[33] == 16'h1111 &&
+                         sram[34] == 16'h00BB) begin
+                $display("[SIMULATION PASSED] String ops test verified:");
+                $display("  MOVSW: 0x%h 0x%h 0x%h  LODSW=0x%h  STOSW=0x%h\n",
+                         sram[30], sram[31], sram[32], sram[33], sram[34]);
+            end else if (sram[30] == 16'h0001 && sram[31] == 16'h0001 &&
+                         sram[32] == 16'h0009 && sram[33] == 16'h00F7 &&
+                         sram[34] == 16'h0088) begin
+                $display("[SIMULATION PASSED] Bit ops test verified:");
+                $display("  BTST Z=0x%h  BSET=0x%h  BCLR=0x%h  BTGL=0x%h  BTST set=0x%h\n",
+                         sram[30], sram[31], sram[32], sram[33], sram[34]);
             end else if (sram[30] == 16'h1234 && sram[31] == 16'h5678 &&
                          sram[32] == 16'h68AC) begin
                 $display("[SIMULATION PASSED] Wait state test verified:");
                 $display("  Slow load 1=0x%h  Slow load 2=0x%h  Sum=0x%h\n",
                          sram[30], sram[31], sram[32]);
+            end else if (sram[53] == 16'h0020 && sram[54] == 16'h0001 &&
+                         sram[55] == 16'h00AA && sram[56] == 16'h0001 &&
+                         sram[57] == 16'h0020) begin
+                $display("[SIMULATION PASSED] MPU / supervisor mode test verified:");
+                $display("  Supervisor GETF=0x%h  TRAP ran=%0d  User write=0x%h",
+                         sram[53], sram[54], sram[55]);
+                $display("  Fault ran=%0d  Fault GETF=0x%h\n", sram[56], sram[57]);
             end else begin
                 $display("[SIMULATION FAILED] Unexpected values in data area.\n");
             end
