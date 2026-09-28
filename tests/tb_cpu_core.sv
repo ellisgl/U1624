@@ -65,11 +65,98 @@ module tb_cpu_core;
     );
 
     // ---------------------------------------------------------
-    // Wait State Generator — slow memory at addresses 50+
+    // DDR3 Memory Path — addresses >= 64 route through DDR3
+    // ---------------------------------------------------------
+    reg mem_clk;
+    wire is_ddr3 = !is_io && !dma_active && (mem_addr >= 24'h000040);
+
+    // DDR3 request generation — one-shot on entering DDR3 space
+    reg ddr3_active;
+    wire ddr3_word_ready;
+    wire ddr3_response_valid;
+    wire [15:0] ddr3_read_data;
+    wire ddr3_fault_timeout;
+    wire ddr3_start = is_ddr3 && !ddr3_active && ddr3_word_ready;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            ddr3_active <= 1'b0;
+        else if (ddr3_start)
+            ddr3_active <= 1'b1;
+        else if (ddr3_response_valid)
+            ddr3_active <= 1'b0;
+    end
+
+    // DDR3 controller signals
+    wire        ctrl_cmd_ready;
+    wire [2:0]  ctrl_cmd;
+    wire        ctrl_cmd_en;
+    wire [28:0] ctrl_addr;
+    wire        ctrl_wr_data_ready;
+    wire [255:0] ctrl_wr_data;
+    wire        ctrl_wr_data_en;
+    wire        ctrl_wr_data_end;
+    wire [31:0] ctrl_wr_data_mask;
+    wire [255:0] ctrl_rd_data;
+    wire        ctrl_rd_data_valid;
+    wire        ctrl_burst;
+
+    ddr3_memory_path #(
+        .TIMEOUT_CYCLES(2048),
+        .WRITE_DRAIN_CYCLES(4)
+    ) ddr3_path (
+        .cpu_clk(clk),
+        .cpu_rst_n(rst_n),
+        .request(ddr3_start),
+        .write_en(mem_write_en),
+        .address(mem_addr[23:0]),
+        .write_data(mem_write_data),
+        .read_data(ddr3_read_data),
+        .ready(ddr3_word_ready),
+        .response_valid(ddr3_response_valid),
+        .fault_timeout(ddr3_fault_timeout),
+        .mem_clk(mem_clk),
+        .mem_rst_n(rst_n),
+        .ctrl_cmd_ready(ctrl_cmd_ready),
+        .ctrl_cmd(ctrl_cmd),
+        .ctrl_cmd_en(ctrl_cmd_en),
+        .ctrl_addr(ctrl_addr),
+        .ctrl_wr_data_ready(ctrl_wr_data_ready),
+        .ctrl_wr_data(ctrl_wr_data),
+        .ctrl_wr_data_en(ctrl_wr_data_en),
+        .ctrl_wr_data_end(ctrl_wr_data_end),
+        .ctrl_wr_data_mask(ctrl_wr_data_mask),
+        .ctrl_rd_data(ctrl_rd_data),
+        .ctrl_rd_data_valid(ctrl_rd_data_valid),
+        .ctrl_burst(ctrl_burst)
+    );
+
+    mock_ddr3_controller #(
+        .MEM_DEPTH(256),
+        .READ_LATENCY(4)
+    ) mock_ddr3 (
+        .clk(mem_clk),
+        .rst_n(rst_n),
+        .cmd_ready(ctrl_cmd_ready),
+        .cmd(ctrl_cmd),
+        .cmd_en(ctrl_cmd_en),
+        .addr(ctrl_addr),
+        .wr_data_ready(ctrl_wr_data_ready),
+        .wr_data(ctrl_wr_data),
+        .wr_data_en(ctrl_wr_data_en),
+        .wr_data_end(ctrl_wr_data_end),
+        .wr_data_mask(ctrl_wr_data_mask),
+        .rd_data(ctrl_rd_data),
+        .rd_data_valid(ctrl_rd_data_valid),
+        .burst(ctrl_burst)
+    );
+
+    // ---------------------------------------------------------
+    // Wait State Generator — slow memory at addresses 50-63
     // ---------------------------------------------------------
     // Simulates a slow memory region by deasserting bus_ready for
     // 1 cycle when the CPU accesses SRAM addresses >= 50.
-    wire slow_access = !is_io && !dma_active && (mem_addr[5:0] >= 6'd50);
+    wire slow_access = !is_io && !dma_active && !is_ddr3 && (mem_addr[5:0] >= 6'd50);
     reg [1:0] wait_cnt;
 
     always @(posedge clk or negedge rst_n) begin
@@ -81,7 +168,8 @@ module tb_cpu_core;
             wait_cnt <= 2'd1;
     end
 
-    wire bus_ready = !(slow_access && wait_cnt > 0);
+    wire ddr3_bus_ready = !is_ddr3 || ddr3_response_valid;
+    wire bus_ready = !(slow_access && wait_cnt > 0) && ddr3_bus_ready;
 
     // Timer peripheral
     wire        timer_irq;
@@ -178,8 +266,9 @@ module tb_cpu_core;
         end
     end
 
-    // Address-decoded read mux — slow region returns garbage until bus_ready
+    // Address-decoded read mux
     assign mem_read_data = is_io ? io_read_data :
+                           is_ddr3 ? ddr3_read_data :
                            (slow_access && !bus_ready) ? 16'hDEAD :
                            sram[mem_addr[5:0]];
 
@@ -221,6 +310,9 @@ module tb_cpu_core;
                         $display("[IO WRITE] Unknown register 0x%h | Data: 0x%h", mem_addr, mem_write_data);
                     end
                 endcase
+            end else if (is_ddr3) begin
+                if (ddr3_start)
+                    $display("[DDR3 WRITE] Addr: 0x%h | Data: 0x%h", mem_addr, mem_write_data);
             end else if (!mpu_fault) begin
                 sram[mem_addr[5:0]] <= mem_write_data;
                 $display("[MEM WRITE] Addr: 0x%h | Data: 0x%h", mem_addr, mem_write_data);
@@ -281,6 +373,14 @@ module tb_cpu_core;
                 $display("[SIMULATION PASSED] Wait state test verified:");
                 $display("  Slow load 1=0x%h  Slow load 2=0x%h  Sum=0x%h\n",
                          sram[30], sram[31], sram[32]);
+            end else if (sram[30] == 16'hBEEF && sram[31] == 16'hCAFE &&
+                         sram[32] == 16'h1234 && sram[33] == 16'h0042 &&
+                         sram[34] == 16'hBEEF) begin
+                $display("[SIMULATION PASSED] DDR3 memory path test verified:");
+                $display("  DDR3 read 1=0x%h  DDR3 read 2=0x%h  DDR3 read 3=0x%h",
+                         sram[30], sram[31], sram[32]);
+                $display("  SRAM write=0x%h  DDR3 re-read=0x%h\n",
+                         sram[33], sram[34]);
             end else if (sram[53] == 16'h0020 && sram[54] == 16'h0001 &&
                          sram[55] == 16'h00AA && sram[56] == 16'h0001 &&
                          sram[57] == 16'h0020) begin
@@ -296,9 +396,10 @@ module tb_cpu_core;
     end
 
     // ---------------------------------------------------------
-    // Clock Generation (50 MHz Simulation Clock Cycle)
+    // Clock Generation
     // ---------------------------------------------------------
-    always #10 clk = ~clk;
+    always #10 clk = ~clk;       // 50 MHz CPU clock
+    always #5  mem_clk = ~mem_clk; // 100 MHz memory clock
 
     // ---------------------------------------------------------
     // Test Vectors Initialization Block
@@ -332,8 +433,9 @@ module tb_cpu_core;
         $display("[RAM INITIALIZATION] Streamed program.hex successfully into array targets.");
 
         // Initialize Control Lines
-        clk   = 0;
-        rst_n = 0;
+        clk     = 0;
+        mem_clk = 0;
+        rst_n   = 0;
 
         // Hold reset active for 2 full clock cycles
         #25;
@@ -345,7 +447,7 @@ module tb_cpu_core;
                  $time, uut.pc, uut.opcode, uut.rf[0], uut.rf[1], uut.rf[2]);
 
         // Fallback Timeout Limit
-        #10000;
+        #50000;
         $display("[TIMEOUT ALERT] Simulation hit max runtime fallback limit.");
         $finish;
     end
