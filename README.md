@@ -12,6 +12,7 @@ A custom 16-bit softcore CPU targeting FPGA, inspired by the **65C816**, **Z8000
 - **Single-level interrupts** with fixed vector, automatic PC/flag save-restore
 - **Memory-mapped I/O** at `0xFFF0`–`0xFFFF` with UART, timer, and DMA peripherals
 - **DMA controller** for CPU-free memory-to-memory block transfers (2 cycles/word)
+- **Bus ready / wait states** — active-high `bus_ready` input allows slow memory or I/O to stall the CPU
 
 ## Instruction Set
 
@@ -142,6 +143,18 @@ The DMA controller performs memory-to-memory block transfers without CPU interve
     STORE R0, [R3 + 3]       ; Start! CPU freezes, resumes when done.
 ```
 
+### Wait States (Bus Ready)
+
+The `bus_ready` input allows slow memory or I/O devices to insert wait states. When `bus_ready` is low during a fetch, read, or write, the CPU stalls in its current state until the device asserts ready. Modeled after the Z80/8086 READY pin.
+
+| State | Behavior when `bus_ready` = 0 |
+|-------|-------------------------------|
+| `S_FETCH` | Holds — instruction not latched, interrupts not checked |
+| `S_MEM_READ` | Holds — read data not sampled |
+| `S_MEM_WRITE` | Holds — `mem_write_en` stays asserted |
+
+Tie `bus_ready` high for zero-wait-state memory. In the testbench, SRAM addresses >= 50 simulate a slow device with 1 wait state per access.
+
 ### Building 16-bit Addresses
 
 `LIMM` loads an 8-bit value (zeroing the upper byte). To construct a full 16-bit address, pair it with `LUI`:
@@ -201,7 +214,8 @@ U1624/
 │   ├── test_signed_branch.asm # BGE/BLT signed comparison test
 │   ├── test_stack_frame.asm # ENTER/LEAVE stack frame test
 │   ├── test_dma.asm         # DMA block transfer test
-│   └── test_rcall.asm       # RCALL relative call test
+│   ├── test_rcall.asm       # RCALL relative call test
+│   └── test_wait_states.asm # Bus ready / wait state test
 ├── tools/
 │   └── assembler.py         # Two-pass assembler CLI tool
 └── run_sim.sh               # Build and simulate script
@@ -336,6 +350,7 @@ graph TB
     PC -->|"addr"| MEM
 
     HOLD_IN(["hold"]) -.-> FSM
+    READY_IN(["bus_ready"]) -.-> FSM
 
     IRQ_IN(["irq"]) --> INT
 ```
@@ -357,8 +372,11 @@ stateDiagram-v2
     EXECUTE --> IRET_FLAGS : IRET
     EXECUTE --> HALTED : HALT
 
-    MEM_READ --> FETCH : data → register or PC (RET)
-    MEM_WRITE --> FETCH : write complete
+    FETCH --> FETCH : !bus_ready (wait state)
+    MEM_READ --> MEM_READ : !bus_ready (wait state)
+    MEM_READ --> FETCH : bus_ready, data → register or PC (RET)
+    MEM_WRITE --> MEM_WRITE : !bus_ready (wait state)
+    MEM_WRITE --> FETCH : bus_ready, write complete
 
     INT_PUSH_PC --> INT_PUSH_FLAGS : push PC to stack
     INT_PUSH_FLAGS --> MEM_WRITE : push flags, disable ints, PC ← 0x0008

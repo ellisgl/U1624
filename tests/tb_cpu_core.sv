@@ -38,6 +38,25 @@ module tb_cpu_core;
     // Address Decode: I/O space 0x00FFF0 - 0x00FFFF
     wire is_io = (mem_addr[15:4] == 12'hFFF);
 
+    // ---------------------------------------------------------
+    // Wait State Generator — slow memory at addresses 50+
+    // ---------------------------------------------------------
+    // Simulates a slow memory region by deasserting bus_ready for
+    // 1 cycle when the CPU accesses SRAM addresses >= 50.
+    wire slow_access = !is_io && !dma_active && (mem_addr[5:0] >= 6'd50);
+    reg [1:0] wait_cnt;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            wait_cnt <= 0;
+        else if (wait_cnt > 0)
+            wait_cnt <= wait_cnt - 1;
+        else if (slow_access)
+            wait_cnt <= 2'd1;
+    end
+
+    wire bus_ready = !(slow_access && wait_cnt > 0);
+
     // Timer peripheral
     wire        timer_irq;
     wire [15:0] timer_read_data;
@@ -72,7 +91,8 @@ module tb_cpu_core;
         .mem_write_data(cpu_mem_write_data),
         .mem_write_en(cpu_mem_write_en),
         .irq(irq),
-        .hold(dma_active)
+        .hold(dma_active),
+        .bus_ready(bus_ready)
     );
 
     // Instantiate Timer Peripheral
@@ -128,8 +148,10 @@ module tb_cpu_core;
         end
     end
 
-    // Address-decoded read mux
-    assign mem_read_data = is_io ? io_read_data : sram[mem_addr[5:0]];
+    // Address-decoded read mux — slow region returns garbage until bus_ready
+    assign mem_read_data = is_io ? io_read_data :
+                           (slow_access && !bus_ready) ? 16'hDEAD :
+                           sram[mem_addr[5:0]];
 
     // Capture UART output
     reg [8*64-1:0] uart_buffer;
@@ -205,6 +227,11 @@ module tb_cpu_core;
                 $display("[SIMULATION PASSED] PDP-16 instructions verified:");
                 $display("  MOV=0x%h  NOT=0x%h  NEG=0x%h", sram[30], sram[31], sram[32]);
                 $display("  ROL=0x%h  ROR=0x%h\n", sram[33], sram[34]);
+            end else if (sram[30] == 16'h1234 && sram[31] == 16'h5678 &&
+                         sram[32] == 16'h68AC) begin
+                $display("[SIMULATION PASSED] Wait state test verified:");
+                $display("  Slow load 1=0x%h  Slow load 2=0x%h  Sum=0x%h\n",
+                         sram[30], sram[31], sram[32]);
             end else begin
                 $display("[SIMULATION FAILED] Unexpected values in data area.\n");
             end

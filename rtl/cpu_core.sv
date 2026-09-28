@@ -47,7 +47,14 @@ module cpu_core (
     // Used by the DMA controller to take over the memory bus for block
     // transfers without the CPU interfering. All registers and outputs
     // hold their values until hold is deasserted.
-    input  wire        hold
+    input  wire        hold,
+
+    // Bus Ready — active-high signal from memory or I/O indicating the
+    // current bus transaction is complete. When low, the CPU inserts
+    // wait states by stalling in FETCH, MEM_READ, or MEM_WRITE until
+    // the device signals it is ready. Modeled after the Z80/8086 READY
+    // pin. Tie high for zero-wait-state memory.
+    input  wire        bus_ready
 );
 
     // =========================================================================
@@ -230,7 +237,9 @@ module cpu_core (
                 // instruction. This ensures interrupts are handled between
                 // instructions, never mid-instruction.
                 S_FETCH: begin
-                    if (irq && int_enable) begin
+                    if (!bus_ready) begin
+                        // Wait state — memory/device not ready yet.
+                    end else if (irq && int_enable) begin
                         // Interrupt requested! Enter the interrupt sequence.
                         state <= S_INT_PUSH_PC;
                     end else begin
@@ -575,28 +584,32 @@ module cpu_core (
                 // What we do with the data depends on which instruction started
                 // the read — we check the opcode and instruction bits to decide.
                 S_MEM_READ: begin
-                    if (opcode == 4'h3) begin
-                        // POP — write the popped value to the destination register
-                        rf[rs]   <= mem_read_data;
-                        mem_addr <= pc;
-                    end else if (opcode == 4'h7 && instr[11:0] == 12'h000) begin
-                        // RET — the value is the return address; load it into PC
-                        pc       <= {8'h00, mem_read_data};
-                        mem_addr <= {8'h00, mem_read_data};
-                    end else if (opcode == 4'h7 && instr[11:0] == 12'h001) begin
-                        // IRET (second phase) — restore PC from stack
-                        pc       <= {8'h00, mem_read_data};
-                        mem_addr <= {8'h00, mem_read_data};
-                    end else if (opcode == 4'h7 && imm8 == 8'h07) begin
-                        // LEAVE (second phase) — restore frame pointer
-                        rf[14]   <= mem_read_data;
-                        mem_addr <= pc;
+                    if (!bus_ready) begin
+                        // Wait state — memory/device not ready yet.
                     end else begin
-                        // LOAD — write the loaded value to the destination register
-                        rf[rt]   <= mem_read_data;
-                        mem_addr <= pc;
+                        if (opcode == 4'h3) begin
+                            // POP — write the popped value to the destination register
+                            rf[rs]   <= mem_read_data;
+                            mem_addr <= pc;
+                        end else if (opcode == 4'h7 && instr[11:0] == 12'h000) begin
+                            // RET — the value is the return address; load it into PC
+                            pc       <= {8'h00, mem_read_data};
+                            mem_addr <= {8'h00, mem_read_data};
+                        end else if (opcode == 4'h7 && instr[11:0] == 12'h001) begin
+                            // IRET (second phase) — restore PC from stack
+                            pc       <= {8'h00, mem_read_data};
+                            mem_addr <= {8'h00, mem_read_data};
+                        end else if (opcode == 4'h7 && imm8 == 8'h07) begin
+                            // LEAVE (second phase) — restore frame pointer
+                            rf[14]   <= mem_read_data;
+                            mem_addr <= pc;
+                        end else begin
+                            // LOAD — write the loaded value to the destination register
+                            rf[rt]   <= mem_read_data;
+                            mem_addr <= pc;
+                        end
+                        state <= S_FETCH;
                     end
-                    state    <= S_FETCH;
                 end
 
                 // =============================================================
@@ -605,9 +618,11 @@ module cpu_core (
                 // The write was initiated in the previous state. Here we just
                 // deassert the write enable and return to FETCH.
                 S_MEM_WRITE: begin
-                    mem_write_en <= 1'b0;  // Done writing
-                    mem_addr     <= pc;     // Set up address for next fetch
-                    state        <= S_FETCH;
+                    if (bus_ready) begin
+                        mem_write_en <= 1'b0;  // Done writing
+                        mem_addr     <= pc;     // Set up address for next fetch
+                        state        <= S_FETCH;
+                    end
                 end
 
                 // =============================================================
